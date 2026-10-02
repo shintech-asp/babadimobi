@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
+import 'package:pestify_flutter/core/state/bookings_refresh.dart';
 import 'package:pestify_flutter/core/theme/app_theme.dart';
 import 'package:pestify_flutter/features/seeker/seeker_api.dart';
 import 'package:pestify_flutter/shared/widgets/loading_button.dart';
@@ -38,6 +39,14 @@ class _BookServiceScreenState extends ConsumerState<BookServiceScreen> {
   bool _isLoading = false;
   bool _profileLoaded = false;
 
+  // Whether the listing being booked requires an on-site inspection before a
+  // final price is set (see api/v1/seeker/bookings/store.php and CLAUDE.md's
+  // "Two-date Inspection → Agreement → Working Date flow"). For these
+  // listings the price shown is only an estimate, so there's no payment
+  // method to choose yet — that happens later once the seeker agrees to the
+  // technician's proposed price and the booking re-enters 'accepted'.
+  bool _requiresInspection = false;
+
   // Map picker state
   double? _pickedLat;
   double? _pickedLng;
@@ -46,6 +55,7 @@ class _BookServiceScreenState extends ConsumerState<BookServiceScreen> {
   void initState() {
     super.initState();
     _loadProfile();
+    _loadListing();
   }
 
   @override
@@ -70,14 +80,41 @@ class _BookServiceScreenState extends ConsumerState<BookServiceScreen> {
           .join(' ');
       final String phone =
           (profile['phone'] ?? profile['contact_number'] ?? '').toString().trim();
+      // Pre-fill convenience only — the seeker can still pin a different
+      // address for this specific booking via the map picker below, and
+      // nothing here blocks submission if it's left blank (see the web's
+      // seeker/setup-address.php lockout bug, fixed earlier, for why this
+      // deliberately isn't a hard requirement).
+      final String savedAddress = (profile['address'] ?? '').toString().trim();
       setState(() {
         if (fullName.isNotEmpty) _nameCtrl.text = fullName;
         if (phone.isNotEmpty) _contactCtrl.text = phone;
+        if (savedAddress.isNotEmpty && _addressCtrl.text.trim().isEmpty) {
+          _addressCtrl.text = savedAddress;
+        }
         _profileLoaded = true;
       });
     } catch (_) {
       // Non-fatal — user can fill in manually.
       if (mounted) setState(() => _profileLoaded = true);
+    }
+  }
+
+  Future<void> _loadListing() async {
+    try {
+      final SeekerApi api = ref.read(seekerApiProvider);
+      final Map<String, dynamic> listing =
+          await api.getListingDetail(widget.listingId);
+      if (!mounted) return;
+      setState(() {
+        _requiresInspection = listing['requires_inspection'] == true ||
+            listing['requires_inspection'] == 1 ||
+            listing['requires_inspection'] == '1';
+      });
+    } catch (_) {
+      // Non-fatal — fall back to showing the payment step; the backend
+      // still enforces the inspection rule regardless of what this screen
+      // shows.
     }
   }
 
@@ -186,9 +223,47 @@ class _BookServiceScreenState extends ConsumerState<BookServiceScreen> {
       final dynamic rawId = result['booking_id'] ?? result['id'];
       final int? bookingId =
           rawId is int ? rawId : int.tryParse(rawId?.toString() ?? '');
+      final bool requiresInspection = result['requires_inspection'] == true;
 
-      if (checkoutUrl == null || bookingId == null) {
+      if (bookingId == null) {
         _showError('Unexpected server response. Please try again.');
+        return;
+      }
+
+      // The booking row now exists server-side regardless of which branch
+      // runs next (inspection-pending, checkout-failed, or a normal payment
+      // redirect) — bump the shared refresh signal so My Bookings' Active
+      // tab picks it up next time it's checked, instead of only reflecting
+      // it after a manual pull-to-refresh (see bookings_refresh.dart).
+      ref.read(bookingsRefreshTick.notifier).state++;
+
+      if (requiresInspection) {
+        // No payment to collect yet — the request was submitted as
+        // 'pending' with only an estimated price. Payment happens later,
+        // once the technician inspects and the seeker agrees to a final
+        // price (see api/v1/seeker/bookings/store.php).
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Request sent! The provider will review it and schedule an '
+              'inspection before a final price is set.',
+            ),
+          ),
+        );
+        context.go('/seeker/bookings');
+        return;
+      }
+
+      if (checkoutUrl == null) {
+        // Booking was saved but PayMongo checkout creation failed
+        // (`paymongo_error` in the response) — not an inspection case.
+        // The seeker can retry payment later from the booking detail
+        // screen, same as _retryPayment() there.
+        _showError(
+          'Booking saved, but starting payment failed. You can retry '
+          'payment from My Bookings.',
+        );
         return;
       }
 
@@ -403,10 +478,21 @@ class _BookServiceScreenState extends ConsumerState<BookServiceScreen> {
               const SizedBox(height: 28),
 
               // ── Schedule section ─────────────────────────────────────────────
+              // For inspection-required listings, the date/time picked here
+              // is stored as `inspection_date` (see
+              // api/v1/seeker/bookings/store.php) — a technician visits on
+              // this date to assess the job, not perform it. The actual
+              // Working Date is set later once the seeker agrees to the
+              // inspection report's proposed price. Label it accordingly so
+              // it doesn't read as if the service itself is scheduled now.
               _SectionHeader(
                 icon: Icons.calendar_today_outlined,
-                title: 'Preferred Schedule',
-                subtitle: 'Select when you need the service.',
+                title: _requiresInspection
+                    ? 'Preferred Inspection Schedule'
+                    : 'Preferred Schedule',
+                subtitle: _requiresInspection
+                    ? 'Select when a technician can inspect on-site. The service date is set after you agree to the final price.'
+                    : 'Select when you need the service.',
               ),
               const SizedBox(height: 16),
 
@@ -416,7 +502,10 @@ class _BookServiceScreenState extends ConsumerState<BookServiceScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: <Widget>[
-                        const _FieldLabel(label: 'DATE'),
+                        _FieldLabel(
+                            label: _requiresInspection
+                                ? 'INSPECTION DATE'
+                                : 'DATE'),
                         const SizedBox(height: 6),
                         _PickerTile(
                           icon: Icons.calendar_today_outlined,
@@ -451,58 +540,27 @@ class _BookServiceScreenState extends ConsumerState<BookServiceScreen> {
               ),
               const SizedBox(height: 28),
 
-              // ── Payment section ──────────────────────────────────────────────
-              _SectionHeader(
-                icon: Icons.payment_outlined,
-                title: 'Payment Method',
-                subtitle: 'Choose how you want to pay.',
-              ),
-              const SizedBox(height: 16),
-
-              // Full Payment card
-              _PaymentOptionCard(
-                value: 'full',
-                groupValue: _paymentMethod,
-                icon: Icons.payments_outlined,
-                iconBg: const Color(0xFF1A1F3A),
-                label: 'Full Payment',
-                description: 'Pay the entire amount before the service begins.',
-                badge: null,
-                onTap: () => setState(() => _paymentMethod = 'full'),
-              ),
-              const SizedBox(height: 12),
-
-              // Down Payment card
-              _PaymentOptionCard(
-                value: 'downpayment',
-                groupValue: _paymentMethod,
-                icon: Icons.account_balance_wallet_outlined,
-                iconBg: const Color(0xFF4C51BF),
-                label: 'Down Payment',
-                description: '50% charged now, remaining balance after service completion.',
-                badge: '50% now',
-                onTap: () => setState(() => _paymentMethod = 'downpayment'),
-              ),
-
-              // Downpayment highlight note
-              if (_paymentMethod == 'downpayment') ...<Widget>[
-                const SizedBox(height: 12),
+              // ── Payment section — hidden entirely for inspection-required
+              // listings. The price isn't final until a technician inspects
+              // on-site, so there's nothing to choose a payment plan against
+              // yet (see api/v1/seeker/bookings/store.php).
+              if (_requiresInspection) ...<Widget>[
                 Container(
                   padding: const EdgeInsets.all(14),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF4C51BF).withValues(alpha: 0.07),
+                    color: AppTheme.primary.withValues(alpha: 0.06),
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(
-                      color: const Color(0xFF4C51BF).withValues(alpha: 0.25),
+                      color: AppTheme.primary.withValues(alpha: 0.25),
                     ),
                   ),
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
                       const Icon(
-                        Icons.info_outline,
-                        size: 16,
-                        color: Color(0xFF4C51BF),
+                        Icons.fact_check_outlined,
+                        size: 18,
+                        color: AppTheme.primary,
                       ),
                       const SizedBox(width: 10),
                       Expanded(
@@ -510,17 +568,18 @@ class _BookServiceScreenState extends ConsumerState<BookServiceScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: <Widget>[
                             Text(
-                              '50% charged now',
+                              'No payment needed yet',
                               style: theme.textTheme.bodySmall?.copyWith(
-                                color: const Color(0xFF4C51BF),
+                                color: AppTheme.primary,
                                 fontWeight: FontWeight.w700,
                               ),
                             ),
                             const SizedBox(height: 3),
                             Text(
-                              'The remaining 50% will be collected after the service is completed to your satisfaction.',
+                              'A technician will inspect on-site and propose a final price. '
+                              "You'll choose a payment method after you agree to it.",
                               style: theme.textTheme.bodySmall?.copyWith(
-                                color: const Color(0xFF4C51BF),
+                                color: AppTheme.primary,
                                 height: 1.4,
                               ),
                             ),
@@ -530,20 +589,103 @@ class _BookServiceScreenState extends ConsumerState<BookServiceScreen> {
                     ],
                   ),
                 ),
-              ],
+                const SizedBox(height: 28),
+              ] else ...<Widget>[
+                _SectionHeader(
+                  icon: Icons.payment_outlined,
+                  title: 'Payment Method',
+                  subtitle: 'Choose how you want to pay.',
+                ),
+                const SizedBox(height: 16),
 
-              const SizedBox(height: 40),
+                // Full Payment card
+                _PaymentOptionCard(
+                  value: 'full',
+                  groupValue: _paymentMethod,
+                  icon: Icons.payments_outlined,
+                  iconBg: const Color(0xFF1A1F3A),
+                  label: 'Full Payment',
+                  description: 'Pay the entire amount before the service begins.',
+                  badge: null,
+                  onTap: () => setState(() => _paymentMethod = 'full'),
+                ),
+                const SizedBox(height: 12),
+
+                // Down Payment card
+                _PaymentOptionCard(
+                  value: 'downpayment',
+                  groupValue: _paymentMethod,
+                  icon: Icons.account_balance_wallet_outlined,
+                  iconBg: const Color(0xFF4C51BF),
+                  label: 'Down Payment',
+                  description: '50% charged now, remaining balance after service completion.',
+                  badge: '50% now',
+                  onTap: () => setState(() => _paymentMethod = 'downpayment'),
+                ),
+
+                // Downpayment highlight note
+                if (_paymentMethod == 'downpayment') ...<Widget>[
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF4C51BF).withValues(alpha: 0.07),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: const Color(0xFF4C51BF).withValues(alpha: 0.25),
+                      ),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        const Icon(
+                          Icons.info_outline,
+                          size: 16,
+                          color: Color(0xFF4C51BF),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: <Widget>[
+                              Text(
+                                '50% charged now',
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: const Color(0xFF4C51BF),
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              const SizedBox(height: 3),
+                              Text(
+                                'The remaining 50% will be collected after the service is completed to your satisfaction.',
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: const Color(0xFF4C51BF),
+                                  height: 1.4,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+
+                const SizedBox(height: 40),
+              ],
 
               // ── Submit ───────────────────────────────────────────────────────
               LoadingButton(
-                label: 'Proceed to Payment',
+                label: _requiresInspection ? 'Submit Request' : 'Proceed to Payment',
                 isLoading: _isLoading,
                 onPressed: _submit,
               ),
               const SizedBox(height: 12),
               Center(
                 child: Text(
-                  'You will be redirected to a secure payment page.',
+                  _requiresInspection
+                      ? "You'll be notified once the provider schedules an inspection."
+                      : 'You will be redirected to a secure payment page.',
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: cs.onSurfaceVariant,
                   ),
@@ -568,21 +710,30 @@ class _MapPickerSheet extends StatefulWidget {
 }
 
 class _MapPickerSheetState extends State<_MapPickerSheet> {
-  late final WebViewController _webCtrl;
+  late WebViewController _webCtrl;
   bool _webReady = false;
+  bool _loadTimedOut = false;
   bool _locating = false;
   double? _lat;
   double? _lng;
   String _displayAddr = 'Tap the map to drop a pin';
 
-  // Cavite, Philippines center coordinates
-  static const double _defaultLat = 14.4791;
-  static const double _defaultLng = 120.8970;
-  static const double _defaultZoom = 12;
-
   @override
   void initState() {
     super.initState();
+    _startLoad(isInitial: true);
+  }
+
+  void _startLoad({bool isInitial = false}) {
+    if (isInitial) {
+      _webReady = false;
+      _loadTimedOut = false;
+    } else {
+      setState(() {
+        _webReady = false;
+        _loadTimedOut = false;
+      });
+    }
     _webCtrl = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..addJavaScriptChannel(
@@ -593,16 +744,60 @@ class _MapPickerSheetState extends State<_MapPickerSheet> {
       )
       ..setNavigationDelegate(
         NavigationDelegate(
+          onPageStarted: (String url) {
+            debugPrint('[MapPicker] onPageStarted: $url');
+          },
           onPageFinished: (String url) {
+            debugPrint('[MapPicker] onPageFinished: $url');
             if (mounted) setState(() => _webReady = true);
+          },
+          onWebResourceError: (WebResourceError error) {
+            debugPrint(
+              '[MapPicker] onWebResourceError: type=${error.errorType} '
+              'code=${error.errorCode} desc=${error.description} '
+              'url=${error.url} isForMainFrame=${error.isForMainFrame}',
+            );
           },
         ),
       )
-      ..loadHtmlString(_buildMapHtml());
+      // Loaded from bundled assets (assets/leaflet/map.html + leaflet.js/css)
+      // rather than fetched from unpkg.com at runtime — a render-blocking
+      // <script src="https://unpkg.com/..."> tag in the old inline HTML
+      // meant onPageFinished (and therefore _webReady) never fired if the
+      // device couldn't reach that CDN, leaving this sheet stuck on its
+      // loading spinner forever with no way to tell why. The map's tile
+      // imagery and reverse-geocoding still need real internet access —
+      // this only removes the *page itself* as a point of network failure.
+      ..loadFlutterAsset('assets/leaflet/map.html');
+
+    // Belt-and-suspenders: if the page still hasn't fired onPageFinished
+    // after a generous window (e.g. a slow/blocked connection to the map
+    // tile servers holding up rendering), stop spinning forever and show a
+    // retry option instead.
+    Future<void>.delayed(const Duration(seconds: 15), () {
+      if (mounted && !_webReady) setState(() => _loadTimedOut = true);
+    });
   }
 
   void _handleMapMessage(String message) {
-    // Expected format: "lat,lng" or "addr:reverse geocoded address"
+    // Expected format: "ready", "lat,lng", or "addr:reverse geocoded address"
+    if (message == 'ready') {
+      // Leaflet has finished laying out the map — the real "usable" signal.
+      // Don't wait for onPageFinished too; see the comment in map.html.
+      if (mounted && !_webReady) setState(() => _webReady = true);
+      return;
+    }
+    if (message == 'outside_cavite') {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Please pick a location within Cavite.'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
     if (message.startsWith('addr:')) {
       final String addr = message.substring(5);
       if (mounted) setState(() => _displayAddr = addr);
@@ -620,79 +815,6 @@ class _MapPickerSheetState extends State<_MapPickerSheet> {
         }
       }
     }
-  }
-
-  String _buildMapHtml() {
-    return '''<!DOCTYPE html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body, #map { width: 100%; height: 100%; }
-  #map { position: relative; }
-  #crosshair {
-    position: absolute; top: 50%; left: 50%;
-    transform: translate(-50%, -50%);
-    width: 32px; height: 32px;
-    pointer-events: none; z-index: 1000;
-    display: none;
-  }
-</style>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-</head>
-<body>
-<div id="map"></div>
-<div id="crosshair">
-  <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <circle cx="16" cy="16" r="14" stroke="#2E8B57" stroke-width="3" fill="white" fill-opacity="0.8"/>
-    <line x1="16" y1="4" x2="16" y2="28" stroke="#2E8B57" stroke-width="2"/>
-    <line x1="4" y1="16" x2="28" y2="16" stroke="#2E8B57" stroke-width="2"/>
-  </svg>
-</div>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script>
-var map = L.map('map').setView([$_defaultLat, $_defaultLng], $_defaultZoom);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '&copy; OpenStreetMap contributors',
-  maxZoom: 19
-}).addTo(map);
-
-var marker = null;
-var greenIcon = L.divIcon({
-  className: '',
-  html: '<div style="width:30px;height:30px;background:#2E8B57;border:3px solid white;border-radius:50% 50% 50% 0;transform:rotate(-45deg);box-shadow:0 2px 8px rgba(0,0,0,0.3);"></div>',
-  iconSize: [30, 30],
-  iconAnchor: [15, 30],
-});
-
-function placeMarker(lat, lng) {
-  if (marker) { map.removeLayer(marker); }
-  marker = L.marker([lat, lng], {icon: greenIcon, draggable: true}).addTo(map);
-  marker.on('dragend', function(e) {
-    var pos = e.target.getLatLng();
-    sendCoords(pos.lat, pos.lng);
-  });
-  sendCoords(lat, lng);
-}
-
-function sendCoords(lat, lng) {
-  FlutterMapChannel.postMessage(lat.toFixed(6) + ',' + lng.toFixed(6));
-  fetch('https://nominatim.openstreetmap.org/reverse?lat=' + lat + '&lon=' + lng + '&format=json')
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
-      var addr = d.display_name || '';
-      FlutterMapChannel.postMessage('addr:' + addr);
-    })
-    .catch(function() {});
-}
-
-map.on('click', function(e) {
-  placeMarker(e.latlng.lat, e.latlng.lng);
-});
-</script>
-</body>
-</html>''';
   }
 
   void _useLocation() {
@@ -762,8 +884,36 @@ map.on('click', function(e) {
               child: Stack(
                 children: <Widget>[
                   WebViewWidget(controller: _webCtrl),
-                  if (!_webReady)
+                  if (!_webReady && !_loadTimedOut)
                     const Center(child: CircularProgressIndicator()),
+                  if (_loadTimedOut && !_webReady)
+                    Container(
+                      color: Colors.white,
+                      alignment: Alignment.center,
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: <Widget>[
+                          const Icon(Icons.wifi_off_rounded,
+                              size: 36, color: AppTheme.textMuted),
+                          const SizedBox(height: 12),
+                          const Text(
+                            "Map is taking too long to load. Check your internet connection.",
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: AppTheme.textMuted,
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          OutlinedButton.icon(
+                            onPressed: _startLoad,
+                            icon: const Icon(Icons.refresh, size: 18),
+                            label: const Text('Retry'),
+                          ),
+                        ],
+                      ),
+                    ),
                 ],
               ),
             ),

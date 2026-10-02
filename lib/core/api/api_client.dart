@@ -58,8 +58,12 @@ class _JwtInterceptor extends Interceptor {
 
 /// Handles error responses uniformly:
 ///
-/// * **401** — re-throws with a clear message but does NOT auto-logout.
+/// * **401 on an authenticated request** (one that carried an `Authorization`
+///   header) — re-thrown as "Session expired" but does NOT auto-logout.
 ///   Session expiry is handled at app startup by SplashScreen → AuthNotifier.init().
+/// * **401 on an unauthenticated request** (e.g. `login.php` rejecting bad
+///   credentials) — falls through to the PHP-provided message instead, since
+///   there was no session to expire.
 /// * All others — extracts the PHP `message` field from the response body
 ///   and re-throws a [DioException] with a human-readable message.
 class _ErrorInterceptor extends Interceptor {
@@ -71,8 +75,10 @@ class _ErrorInterceptor extends Interceptor {
     ErrorInterceptorHandler handler,
   ) async {
     final int? statusCode = err.response?.statusCode;
+    final bool wasAuthenticatedRequest =
+        err.requestOptions.headers.containsKey('Authorization');
 
-    if (statusCode == 401) {
+    if (statusCode == 401 && wasAuthenticatedRequest) {
       // Re-throw with a clear message but do NOT auto-logout.
       // Session expiry is handled at app startup by SplashScreen → AuthNotifier.init().
       handler.reject(

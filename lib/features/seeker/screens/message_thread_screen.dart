@@ -1,62 +1,78 @@
-﻿import 'dart:async';
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import 'package:pestify_flutter/core/auth/auth_state.dart';
 import 'package:pestify_flutter/core/theme/app_theme.dart';
 import 'package:pestify_flutter/features/seeker/seeker_api.dart';
+import 'package:pestify_flutter/shared/utils/timestamps.dart';
 
-/// Chat bubble thread between the seeker and a specific provider.
+/// Transaction-scoped chat thread for one booking — mirrors the web's
+/// seeker/messages-seeker.php: the header always shows the service + status,
+/// a payment-due banner appears using the exact same predicate
+/// [BookingDetailScreen] uses for its "Complete Payment" button, and the
+/// input is replaced with a closed notice once the booking is
+/// completed/cancelled.
 ///
 /// Expected GoRouter extra:
 /// ```dart
 /// context.push(
 ///   '/seeker/message-thread',
-///   extra: {'providerId': 5, 'providerName': 'Green Shield Pest Control'},
+///   extra: {
+///     'bookingId': 76,
+///     'companyName': 'Green Shield Pest Control',
+///     'serviceName': 'Rat Exterminator',
+///     'status': 'accepted',
+///   },
 /// );
 /// ```
 class MessageThreadScreen extends ConsumerStatefulWidget {
   const MessageThreadScreen({
     super.key,
-    required this.providerId,
-    required this.providerName,
+    required this.bookingId,
+    this.initialCompanyName = 'Provider',
+    this.initialServiceName = '',
+    this.initialStatus = '',
   });
 
-  final int providerId;
-  final String providerName;
+  final int bookingId;
+  final String initialCompanyName;
+  final String initialServiceName;
+  final String initialStatus;
 
   @override
   ConsumerState<MessageThreadScreen> createState() =>
       _MessageThreadScreenState();
 }
 
-class _MessageThreadScreenState
-    extends ConsumerState<MessageThreadScreen> {
+class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen>
+    with WidgetsBindingObserver {
   final TextEditingController _inputCtrl = TextEditingController();
   final ScrollController _scrollCtrl = ScrollController();
   final FocusNode _focusNode = FocusNode();
 
   List<dynamic> _messages = <dynamic>[];
+  Map<String, dynamic> _booking = <String, dynamic>{};
   bool _initialLoading = true;
   bool _sending = false;
   Timer? _pollTimer;
+  bool _pollPaused = false;
 
   @override
   void initState() {
     super.initState();
-    _loadThread().then((_) {
-      if (!mounted) return;
-      // Start polling after the first load completes.
-      _pollTimer = Timer.periodic(
-        const Duration(seconds: 8),
-        (_) => _loadThread(),
-      );
+    WidgetsBinding.instance.addObserver(this);
+    _loadThread();
+    _pollTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+      if (!_pollPaused) _poll();
     });
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _pollTimer?.cancel();
     _inputCtrl.dispose();
     _scrollCtrl.dispose();
@@ -64,36 +80,84 @@ class _MessageThreadScreenState
     super.dispose();
   }
 
+  // Pauses polling while the app is backgrounded — the mobile equivalent of
+  // the web's Page Visibility API pause in seeker/messages-seeker.php.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _pollPaused = state != AppLifecycleState.resumed;
+  }
+
+  // The MAX id across all loaded messages, not just the last one — ordering
+  // is by created_at (1-second resolution), so two messages written in the
+  // same second can come back id-descending, which would otherwise regress
+  // the poll cursor and cause the higher-id message to be re-appended.
+  int get _lastMessageId {
+    int max = 0;
+    for (final dynamic m in _messages) {
+      final dynamic raw = m['id'];
+      final int id = raw is int ? raw : int.tryParse(raw?.toString() ?? '') ?? 0;
+      if (id > max) max = id;
+    }
+    return max;
+  }
+
   Future<void> _loadThread() async {
     try {
-      final List<dynamic> msgs = await ref
-          .read(seekerApiProvider)
-          .getMessageThread(widget.providerId);
-
+      final Map<String, dynamic> result =
+          await ref.read(seekerApiProvider).getBookingThread(widget.bookingId);
       if (!mounted) return;
-
-      final bool wasAtBottom = _isAtBottom();
       setState(() {
-        _messages = msgs;
+        _messages = result['messages'] as List<dynamic>? ?? <dynamic>[];
+        _booking = (result['booking'] as Map<String, dynamic>?) ??
+            <String, dynamic>{};
         _initialLoading = false;
       });
-
-      // Scroll to bottom if user was at the bottom or it is the first load.
-      if (wasAtBottom || _initialLoading) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _scrollToBottom();
-        });
-      }
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
     } catch (_) {
       if (!mounted) return;
       setState(() => _initialLoading = false);
     }
   }
 
+  Future<void> _poll() async {
+    if (_initialLoading) return;
+    try {
+      final Map<String, dynamic> result = await ref
+          .read(seekerApiProvider)
+          .pollBookingMessages(bookingId: widget.bookingId, sinceId: _lastMessageId);
+      if (!mounted) return;
+      final List<dynamic> newMsgs = result['messages'] as List<dynamic>? ?? <dynamic>[];
+      final String? newStatus = result['status'] as String?;
+      final bool statusChanged =
+          newStatus != null && newStatus != (_booking['status'] as String?);
+
+      if (newMsgs.isEmpty && !statusChanged) return;
+
+      if (statusChanged) {
+        // Status changed underneath us (e.g. provider accepted, or the
+        // booking closed) — reload full context so the header/payment
+        // banner reflect it correctly, same as the web's full-panel reload.
+        await _loadThread();
+        return;
+      }
+
+      final bool wasAtBottom = _isAtBottom();
+      final Set<dynamic> existingIds = _messages.map((dynamic m) => m['id']).toSet();
+      final List<dynamic> deduped = newMsgs.where((dynamic m) => !existingIds.contains(m['id'])).toList();
+      setState(() {
+        _messages = <dynamic>[..._messages, ...deduped];
+      });
+      if (wasAtBottom) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+      }
+    } catch (_) {
+      // Silent — a failed poll tick just retries on the next one.
+    }
+  }
+
   bool _isAtBottom() {
     if (!_scrollCtrl.hasClients) return true;
-    return _scrollCtrl.offset >=
-        _scrollCtrl.position.maxScrollExtent - 80;
+    return _scrollCtrl.offset >= _scrollCtrl.position.maxScrollExtent - 80;
   }
 
   void _scrollToBottom() {
@@ -113,31 +177,88 @@ class _MessageThreadScreenState
     _inputCtrl.clear();
 
     try {
-      await ref.read(seekerApiProvider).sendMessage(
-            receiverId: widget.providerId,
+      await ref.read(seekerApiProvider).sendBookingMessage(
+            bookingId: widget.bookingId,
             message: text,
           );
-
       if (!mounted) return;
       await _loadThread();
+    } catch (e) {
       if (!mounted) return;
-      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
-    } catch (_) {
-      if (!mounted) return;
-      // Restore the text on failure so the user can retry.
       _inputCtrl.text = text;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Failed to send message. Try again.')),
+        SnackBar(content: Text(_extractError(e))),
       );
     } finally {
       if (mounted) setState(() => _sending = false);
     }
   }
 
+  String _extractError(Object e) {
+    // SeekerApi's error helpers always throw a plain Exception (never a raw
+    // StateError), so e.toString() is "Exception: <message>" — the old
+    // 'StateError: ' prefix check never matched, leaving that literal
+    // "Exception: " prefix in the snackbar text.
+    return e.toString().replaceFirst('Exception: ', '');
+  }
+
+  // ── Payment-due predicate ────────────────────────────────────────────────
+  //
+  // Same gate as BookingDetailScreen's "Complete Payment" button: status +
+  // payment_status, plus (for inspection-required listings) requiring the
+  // seeker to have already agreed to the final price — otherwise the
+  // estimate-only pre-inspection window would wrongly show "Pay Now".
+
+  bool get _requiresInspection =>
+      _booking['requires_inspection'] == true ||
+      _booking['requires_inspection'] == 1 ||
+      _booking['requires_inspection'] == '1';
+
+  bool get _needsInitialPayment {
+    final String status = (_booking['status'] as String?) ?? '';
+    final String paymentStatus =
+        (_booking['payment_status'] as String?)?.toLowerCase() ?? '';
+    final bool priceIsFinal =
+        !_requiresInspection || isRealTimestamp(_booking['inspection_agreed_at']);
+    return status == 'accepted' && paymentStatus == 'unpaid' && priceIsFinal;
+  }
+
+  bool get _needsRemainingPayment {
+    final String status = (_booking['status'] as String?) ?? '';
+    final String paymentStatus =
+        (_booking['payment_status'] as String?)?.toLowerCase() ?? '';
+    return status == 'waiting_remaining_payment' && paymentStatus == 'partial';
+  }
+
+  double _num(dynamic v) => v is num ? v.toDouble() : double.tryParse(v?.toString() ?? '') ?? 0;
+
+  double get _payAmount {
+    if (_needsRemainingPayment) return _num(_booking['remaining_amount']);
+    final String method = (_booking['payment_method'] as String?) ?? '';
+    return method == 'downpayment'
+        ? _num(_booking['downpayment_amount'])
+        : _num(_booking['total_amount']);
+  }
+
+  String get _payLabel => _needsRemainingPayment
+      ? 'Pay Remaining Balance'
+      : ((_booking['payment_method'] as String?) == 'downpayment'
+          ? 'Pay Downpayment'
+          : 'Pay Now');
+
+  bool get _chatOpen => _booking['chat_open'] == true;
+
   @override
   Widget build(BuildContext context) {
     final AuthState auth = ref.watch(authProvider);
     final int? myUserId = auth.userId;
+
+    final String companyName =
+        (_booking['company_name'] as String?) ?? widget.initialCompanyName;
+    final String serviceName =
+        (_booking['service_name'] as String?) ?? widget.initialServiceName;
+    final String status = (_booking['status'] as String?) ?? widget.initialStatus;
+    final bool needsPayment = _needsInitialPayment || _needsRemainingPayment;
 
     return Scaffold(
       backgroundColor: AppTheme.surface,
@@ -146,26 +267,33 @@ class _MessageThreadScreenState
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             Text(
-              widget.providerName,
-              style: const TextStyle(
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
-              ),
+              companyName,
+              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
             ),
-            const Text(
-              'Provider',
-              style: TextStyle(
+            Text(
+              serviceName.isEmpty ? 'Provider' : '$serviceName · ${_statusLabel(status)}',
+              style: const TextStyle(
                 fontSize: 11,
                 color: AppTheme.textMuted,
                 fontWeight: FontWeight.w400,
               ),
+              overflow: TextOverflow.ellipsis,
             ),
           ],
         ),
       ),
       body: SafeArea(
         child: Column(
-          children: [
+          children: <Widget>[
+            if (!_initialLoading && needsPayment)
+              _PaymentBanner(
+                label: _payLabel,
+                amount: _payAmount,
+                onTap: () => context.push(
+                  '/seeker/booking/${widget.bookingId}',
+                ),
+              ),
+
             // ── Message list ───────────────────────────────────────────────
             Expanded(
               child: _initialLoading
@@ -180,14 +308,12 @@ class _MessageThreadScreenState
                             vertical: 12,
                           ),
                           itemCount: _messages.length,
-                          itemBuilder: (context, index) {
+                          itemBuilder: (BuildContext context, int index) {
                             final dynamic msg = _messages[index];
                             final dynamic rawSender = msg['sender_id'];
                             final int senderId = rawSender is int
                                 ? rawSender
-                                : int.tryParse(
-                                        rawSender?.toString() ?? '') ??
-                                    -1;
+                                : int.tryParse(rawSender?.toString() ?? '') ?? -1;
                             final bool isMe = senderId == myUserId;
                             return _ChatBubble(
                               message: msg,
@@ -198,37 +324,162 @@ class _MessageThreadScreenState
                         ),
             ),
 
-            // ── Input bar ──────────────────────────────────────────────────
-            _InputBar(
-              controller: _inputCtrl,
-              focusNode: _focusNode,
-              sending: _sending,
-              onSend: _send,
-            ),
+            // ── Input bar / closed notice ─────────────────────────────────
+            if (_initialLoading)
+              const SizedBox.shrink()
+            else if (!_chatOpen)
+              _ClosedBar(status: status)
+            else
+              _InputBar(
+                controller: _inputCtrl,
+                focusNode: _focusNode,
+                sending: _sending,
+                onSend: _send,
+              ),
           ],
         ),
       ),
     );
   }
 
-  /// Returns true if this message's date differs from the previous one,
-  /// or if it is the first message — so a date separator is rendered.
   bool _shouldShowDate(int index) {
     if (index == 0) return true;
-    final String? currDate =
-        _messages[index]['created_at'] as String?;
-    final String? prevDate =
-        _messages[index - 1]['created_at'] as String?;
+    final String? currDate = _messages[index]['created_at'] as String?;
+    final String? prevDate = _messages[index - 1]['created_at'] as String?;
     if (currDate == null || prevDate == null) return false;
     try {
       final DateTime curr = DateTime.parse(currDate).toLocal();
       final DateTime prev = DateTime.parse(prevDate).toLocal();
-      return curr.day != prev.day ||
-          curr.month != prev.month ||
-          curr.year != prev.year;
+      return curr.day != prev.day || curr.month != prev.month || curr.year != prev.year;
     } catch (_) {
       return false;
     }
+  }
+
+  String _statusLabel(String status) {
+    switch (status) {
+      case 'pending':
+        return 'Pending';
+      case 'accepted':
+        return 'Accepted';
+      case 'awaiting_agreement':
+        return 'Awaiting agreement';
+      case 'revising':
+        return 'Revising quote';
+      case 'preparing':
+        return 'Preparing';
+      case 'starting':
+        return 'Starting';
+      case 'on_going':
+      case 'ongoing':
+      case 'in_progress':
+        return 'Ongoing';
+      case 'waiting_remaining_payment':
+        return 'Awaiting payment';
+      case 'waiting_provider_confirmation':
+        return 'Awaiting confirmation';
+      case 'completed':
+        return 'Completed';
+      case 'cancelled':
+        return 'Cancelled';
+      default:
+        return status.isEmpty
+            ? ''
+            : status[0].toUpperCase() + status.substring(1).replaceAll('_', ' ');
+    }
+  }
+}
+
+// ── Payment banner ───────────────────────────────────────────────────────────
+
+class _PaymentBanner extends StatelessWidget {
+  const _PaymentBanner({
+    required this.label,
+    required this.amount,
+    required this.onTap,
+  });
+
+  final String label;
+  final double amount;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final NumberFormat peso = NumberFormat.currency(locale: 'en_PH', symbol: '₱');
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFEFFBF3),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFBEEBCE)),
+      ),
+      child: Row(
+        children: <Widget>[
+          const Icon(Icons.credit_card_rounded, color: AppTheme.primary, size: 22),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'Payment due',
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppTheme.navy),
+                ),
+                Text(
+                  peso.format(amount),
+                  style: const TextStyle(fontSize: 12.5, color: AppTheme.textMuted),
+                ),
+              ],
+            ),
+          ),
+          ElevatedButton(
+            onPressed: onTap,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppTheme.primary,
+              foregroundColor: Colors.white,
+              elevation: 0,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+            child: Text(label, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Closed-conversation bar ──────────────────────────────────────────────────
+
+class _ClosedBar extends StatelessWidget {
+  const _ClosedBar({required this.status});
+  final String status;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF4F6F5),
+        border: Border(top: BorderSide(color: Colors.grey.shade300)),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: <Widget>[
+          Icon(Icons.lock_outline_rounded, size: 16, color: Colors.grey.shade600),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              'This conversation is closed because the service is $status.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12.5, color: Colors.grey.shade700),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -254,7 +505,7 @@ class _ChatBubble extends StatelessWidget {
     final String timeLabel = _timeLabel(createdAt);
 
     return Column(
-      children: [
+      children: <Widget>[
         if (showDate) _DateSeparator(dateStr: createdAt),
         Align(
           alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
@@ -263,10 +514,7 @@ class _ChatBubble extends StatelessWidget {
               maxWidth: MediaQuery.of(context).size.width * 0.72,
             ),
             margin: const EdgeInsets.symmetric(vertical: 3),
-            padding: const EdgeInsets.symmetric(
-              horizontal: 14,
-              vertical: 10,
-            ),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
               color: isMe ? AppTheme.primary : theirBubble,
               borderRadius: BorderRadius.only(
@@ -275,7 +523,7 @@ class _ChatBubble extends StatelessWidget {
                 bottomLeft: Radius.circular(isMe ? 18 : 4),
                 bottomRight: Radius.circular(isMe ? 4 : 18),
               ),
-              boxShadow: [
+              boxShadow: <BoxShadow>[
                 BoxShadow(
                   color: Colors.black.withValues(alpha: 0.05),
                   blurRadius: 4,
@@ -284,10 +532,8 @@ class _ChatBubble extends StatelessWidget {
               ],
             ),
             child: Column(
-              crossAxisAlignment: isMe
-                  ? CrossAxisAlignment.end
-                  : CrossAxisAlignment.start,
-              children: [
+              crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+              children: <Widget>[
                 Text(
                   text,
                   style: TextStyle(
@@ -301,9 +547,7 @@ class _ChatBubble extends StatelessWidget {
                   timeLabel,
                   style: TextStyle(
                     fontSize: 10,
-                    color: isMe
-                        ? Colors.white.withValues(alpha: 0.65)
-                        : Colors.grey.shade500,
+                    color: isMe ? Colors.white.withValues(alpha: 0.65) : Colors.grey.shade500,
                   ),
                 ),
               ],
@@ -353,7 +597,7 @@ class _DateSeparator extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 12),
       child: Row(
-        children: [
+        children: <Widget>[
           const Expanded(child: Divider()),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -402,13 +646,11 @@ class _InputBar extends StatelessWidget {
       ),
       decoration: BoxDecoration(
         color: Colors.white,
-        border: Border(
-          top: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.3)),
-        ),
+        border: Border(top: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.3))),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
+        children: <Widget>[
           Expanded(
             child: TextField(
               controller: controller,
@@ -419,10 +661,7 @@ class _InputBar extends StatelessWidget {
               style: const TextStyle(fontSize: 14),
               decoration: InputDecoration(
                 hintText: 'Type a message…',
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 10,
-                ),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                 filled: true,
                 fillColor: const Color(0xFFF4F6F5),
                 border: OutlineInputBorder(
@@ -442,32 +681,24 @@ class _InputBar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 6),
-          AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            child: MaterialButton(
-              onPressed: sending ? null : onSend,
-              minWidth: 44,
-              height: 44,
-              padding: EdgeInsets.zero,
-              shape: const CircleBorder(),
-              color: AppTheme.primary,
-              disabledColor: AppTheme.primary.withValues(alpha: 0.4),
-              child: sending
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        valueColor:
-                            AlwaysStoppedAnimation<Color>(Colors.white),
-                      ),
-                    )
-                  : const Icon(
-                      Icons.send_rounded,
-                      color: Colors.white,
-                      size: 20,
+          MaterialButton(
+            onPressed: sending ? null : onSend,
+            minWidth: 44,
+            height: 44,
+            padding: EdgeInsets.zero,
+            shape: const CircleBorder(),
+            color: AppTheme.primary,
+            disabledColor: AppTheme.primary.withValues(alpha: 0.4),
+            child: sending
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                     ),
-            ),
+                  )
+                : const Icon(Icons.send_rounded, color: Colors.white, size: 20),
           ),
         ],
       ),
@@ -485,7 +716,7 @@ class _EmptyThread extends StatelessWidget {
         padding: const EdgeInsets.all(32),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
-          children: [
+          children: <Widget>[
             Icon(
               Icons.chat_rounded,
               size: 56,
@@ -511,4 +742,3 @@ class _EmptyThread extends StatelessWidget {
     );
   }
 }
-

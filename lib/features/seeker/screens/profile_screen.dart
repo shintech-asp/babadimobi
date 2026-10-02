@@ -23,6 +23,10 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   final TextEditingController _firstNameCtrl = TextEditingController();
   final TextEditingController _lastNameCtrl = TextEditingController();
   final TextEditingController _phoneCtrl = TextEditingController();
+  final TextEditingController _addressCtrl = TextEditingController();
+  final TextEditingController _cityCtrl = TextEditingController();
+  final TextEditingController _stateCtrl = TextEditingController();
+  final TextEditingController _zipCodeCtrl = TextEditingController();
 
   Map<String, dynamic>? _profile;
   bool _loadingProfile = true;
@@ -43,6 +47,10 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     _firstNameCtrl.dispose();
     _lastNameCtrl.dispose();
     _phoneCtrl.dispose();
+    _addressCtrl.dispose();
+    _cityCtrl.dispose();
+    _stateCtrl.dispose();
+    _zipCodeCtrl.dispose();
     super.dispose();
   }
 
@@ -60,6 +68,10 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
         _firstNameCtrl.text = (data['first_name'] as String?) ?? '';
         _lastNameCtrl.text = (data['last_name'] as String?) ?? '';
         _phoneCtrl.text = (data['phone'] as String?) ?? '';
+        _addressCtrl.text = (data['address'] as String?) ?? '';
+        _cityCtrl.text = (data['city'] as String?) ?? '';
+        _stateCtrl.text = (data['state'] as String?) ?? '';
+        _zipCodeCtrl.text = (data['zip_code'] as String?) ?? '';
       });
     } catch (_) {
       if (!mounted) return;
@@ -125,6 +137,10 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                 firstName: _firstNameCtrl.text.trim(),
                 lastName: _lastNameCtrl.text.trim(),
                 phone: _phoneCtrl.text.trim(),
+                address: _addressCtrl.text.trim(),
+                city: _cityCtrl.text.trim(),
+                state: _stateCtrl.text.trim(),
+                zipCode: _zipCodeCtrl.text.trim(),
               );
       if (!ctx.mounted) return;
       setState(() => _profile = updated);
@@ -334,6 +350,61 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                                 label: 'Phone Number',
                                 icon: Icons.phone_outlined,
                                 keyboardType: TextInputType.phone,
+                                isLast: true,
+                              ),
+                            ],
+                          ),
+                        ),
+
+                        const SizedBox(height: 24),
+
+                        // ── Address section ──────────────────────────────
+                        // Optional — kept lightweight on purpose. Every
+                        // booking already captures its own address via its
+                        // own map picker (book_service_screen.dart), so this
+                        // is a pre-fill convenience, not a gate the seeker
+                        // can get stuck behind (the opposite of the
+                        // web onboarding-lockout bug fixed earlier).
+                        const _SectionLabel('Address (optional)'),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Used to pre-fill the address on new bookings.',
+                          style: TextStyle(fontSize: 12, color: AppTheme.textMuted),
+                        ),
+                        const SizedBox(height: 10),
+                        Container(
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF8FAFC),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(
+                                color: AppTheme.border, width: 1),
+                          ),
+                          child: Column(
+                            children: <Widget>[
+                              _SettingsField(
+                                controller: _addressCtrl,
+                                label: 'Address',
+                                icon: Icons.home_outlined,
+                                textCapitalization: TextCapitalization.words,
+                                isFirst: true,
+                              ),
+                              _SettingsField(
+                                controller: _cityCtrl,
+                                label: 'City',
+                                icon: Icons.location_city_outlined,
+                                textCapitalization: TextCapitalization.words,
+                              ),
+                              _SettingsField(
+                                controller: _stateCtrl,
+                                label: 'Province',
+                                icon: Icons.map_outlined,
+                                textCapitalization: TextCapitalization.words,
+                              ),
+                              _SettingsField(
+                                controller: _zipCodeCtrl,
+                                label: 'Zip Code',
+                                icon: Icons.markunread_mailbox_outlined,
+                                keyboardType: TextInputType.number,
                                 isLast: true,
                               ),
                             ],

@@ -411,7 +411,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                         child: _ListingCard(
                           data: _listings[index],
                           onTap: () {
-                            final int? id = _listings[index]['id'] as int?;
+                            final int? id = int.tryParse(
+                              _listings[index]['id']?.toString() ?? '',
+                            );
                             if (id != null) {
                               context.push('/seeker/listing/$id');
                             }

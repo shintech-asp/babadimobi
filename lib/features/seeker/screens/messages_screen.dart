@@ -6,7 +6,10 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:pestify_flutter/core/theme/app_theme.dart';
 import 'package:pestify_flutter/features/seeker/seeker_api.dart';
 
-/// Inbox — list of conversation threads between the seeker and providers.
+/// Inbox — list of transaction-scoped chat threads, one per booking the
+/// seeker has ever made (mirrors the web's seeker/messages-seeker.php). A
+/// booking with zero messages yet still shows up as a startable thread; a
+/// completed/cancelled booking's thread is read-only once opened.
 ///
 /// Layout inspired by Telegram 2024: custom header with large title + inline
 /// search bar, gradient-colored initials avatars (56px), no list separators.
@@ -43,17 +46,11 @@ class _MessagesScreenState extends ConsumerState<MessagesScreen> {
       _filtered = q.isEmpty
           ? _threads
           : _threads.where((dynamic t) {
-              final String firstName = (t['first_name'] as String?) ?? '';
-              final String lastName = (t['last_name'] as String?) ?? '';
-              final String name =
-                  (t['provider_name'] as String?) ??
-                      (t['business_name'] as String?) ??
-                      '$firstName $lastName'.trim();
-              final String lastMsg =
-                  (t['last_msg'] as String?) ??
-                      (t['last_message'] as String?) ??
-                      '';
+              final String name = (t['company_name'] as String?) ?? '';
+              final String service = (t['service_name'] as String?) ?? '';
+              final String lastMsg = (t['last_msg'] as String?) ?? '';
               return name.toLowerCase().contains(q) ||
+                  service.toLowerCase().contains(q) ||
                   lastMsg.toLowerCase().contains(q);
             }).toList();
     });
@@ -66,7 +63,7 @@ class _MessagesScreenState extends ConsumerState<MessagesScreen> {
     });
     try {
       final List<dynamic> threads =
-          await ref.read(seekerApiProvider).getMessages();
+          await ref.read(seekerApiProvider).getBookingThreads();
       if (!mounted) return;
       setState(() {
         _threads = threads;
@@ -127,23 +124,19 @@ class _MessagesScreenState extends ConsumerState<MessagesScreen> {
   }
 
   void _openThread(dynamic thread) {
-    final int providerId =
-        (thread['provider_id'] as int?) ??
-            (thread['user_id'] as int?) ??
-            (thread['id'] as int? ?? 0);
-    final String firstName = (thread['first_name'] as String?) ?? '';
-    final String lastName = (thread['last_name'] as String?) ?? '';
-    final String providerName =
-        (thread['provider_name'] as String?) ??
-            (thread['business_name'] as String?) ??
-            (firstName.isNotEmpty || lastName.isNotEmpty
-                ? '$firstName $lastName'.trim()
-                : 'Provider');
+    final int bookingId =
+        int.tryParse(thread['booking_id']?.toString() ?? '') ?? 0;
+    if (bookingId <= 0) return;
     context.push(
       '/seeker/message-thread',
       extra: <String, dynamic>{
-        'providerId': providerId,
-        'providerName': providerName,
+        'bookingId': bookingId,
+        // Passed only so the header has something to show before the first
+        // fetch resolves — the thread screen always reloads full context
+        // (status, price, payment) from the server itself.
+        'companyName': (thread['company_name'] as String?) ?? 'Provider',
+        'serviceName': (thread['service_name'] as String?) ?? '',
+        'status': (thread['status'] as String?) ?? '',
       },
     );
   }
@@ -263,20 +256,12 @@ class _ThreadTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final String firstName = (thread['first_name'] as String?) ?? '';
-    final String lastName = (thread['last_name'] as String?) ?? '';
-    final String name =
-        (thread['provider_name'] as String?) ??
-            (thread['business_name'] as String?) ??
-            (firstName.isNotEmpty || lastName.isNotEmpty
-                ? '$firstName $lastName'.trim()
-                : 'Provider');
-    final String lastMsg =
-        (thread['last_msg'] as String?) ??
-            (thread['last_message'] as String?) ??
-            '';
-    final String? avatarUrl =
-        (thread['profile_image'] as String?) ?? (thread['avatar'] as String?);
+    final String name = (thread['company_name'] as String?) ?? 'Provider';
+    final String serviceName = (thread['service_name'] as String?) ?? '';
+    final String status = (thread['status'] as String?) ?? '';
+    final bool isClosed = status == 'completed' || status == 'cancelled';
+    final String lastMsg = (thread['last_msg'] as String?) ?? '';
+    const String? avatarUrl = null; // no provider logo in the thread list yet
     final String? createdAt =
         (thread['last_time'] as String?) ?? (thread['created_at'] as String?);
     final dynamic rawUnread = thread['unread'] ?? thread['unread_count'];
@@ -342,7 +327,37 @@ class _ThreadTile extends StatelessWidget {
                       ),
                     ],
                   ),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 2),
+                  Row(
+                    children: <Widget>[
+                      Container(
+                        width: 6,
+                        height: 6,
+                        margin: const EdgeInsets.only(right: 6),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: isClosed
+                              ? AppTheme.textMuted.withValues(alpha: 0.5)
+                              : AppTheme.primary,
+                        ),
+                      ),
+                      Expanded(
+                        child: Text(
+                          serviceName.isEmpty
+                              ? _statusLabel(status)
+                              : '$serviceName · ${_statusLabel(status)}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 11.5,
+                            color: AppTheme.textMuted,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 3),
                   Row(
                     children: <Widget>[
                       Expanded(
@@ -405,6 +420,39 @@ class _ThreadTile extends StatelessWidget {
       return DateFormat('MMM d').format(dt);
     } catch (_) {
       return '';
+    }
+  }
+
+  String _statusLabel(String status) {
+    switch (status) {
+      case 'pending':
+        return 'Pending';
+      case 'accepted':
+        return 'Accepted';
+      case 'awaiting_agreement':
+        return 'Awaiting agreement';
+      case 'revising':
+        return 'Revising quote';
+      case 'preparing':
+        return 'Preparing';
+      case 'starting':
+        return 'Starting';
+      case 'on_going':
+      case 'ongoing':
+      case 'in_progress':
+        return 'Ongoing';
+      case 'waiting_remaining_payment':
+        return 'Awaiting payment';
+      case 'waiting_provider_confirmation':
+        return 'Awaiting confirmation';
+      case 'completed':
+        return 'Completed';
+      case 'cancelled':
+        return 'Cancelled';
+      default:
+        return status.isEmpty
+            ? ''
+            : status[0].toUpperCase() + status.substring(1).replaceAll('_', ' ');
     }
   }
 }

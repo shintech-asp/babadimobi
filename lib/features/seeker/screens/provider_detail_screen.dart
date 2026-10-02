@@ -5,8 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
+import 'package:pestify_flutter/core/api/api_endpoints.dart';
 import 'package:pestify_flutter/core/theme/app_theme.dart';
 import 'package:pestify_flutter/features/seeker/seeker_api.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class ProviderDetailScreen extends ConsumerStatefulWidget {
   const ProviderDetailScreen({super.key, required this.providerId});
@@ -121,17 +123,24 @@ class _ProviderDetailScreenState
     final Map<String, dynamic> d = _data!;
     final String company =
         (d['company_name'] as String?) ?? 'Provider';
-    final String? coverUrl = d['cover_url'] as String?;
-    final String? logoUrl = d['logo_url'] as String?;
+    // providers has no cover-photo column — this stays null and the header
+    // falls back to a gradient; not a bug, just a feature with no data yet.
+    final String? coverUrl = ApiEndpoints.resolveImageUrl(d['cover_url'] as String?);
+    final String? logoUrl = ApiEndpoints.resolveImageUrl(d['logo_url'] as String?);
     final String description = (d['description'] as String?) ?? '';
     final String city = (d['city'] as String?) ?? '';
     final String address = (d['address'] as String?) ?? '';
-    final num rating = (d['rating'] as num?) ?? 0;
-    final int reviewCount = (d['review_count'] as int?) ?? 0;
+    // PHP returns avg_rating, not rating — see api/v1/providers/show.php.
+    final num rating = double.tryParse(d['avg_rating']?.toString() ?? '') ?? 0;
+    final int reviewCount = int.tryParse(d['review_count']?.toString() ?? '') ?? 0;
     final List<dynamic> services =
         (d['services'] as List<dynamic>?) ?? <dynamic>[];
     final List<dynamic> reviews =
         (d['reviews'] as List<dynamic>?) ?? <dynamic>[];
+    final List<dynamic> portfolioImages =
+        (d['portfolio_images'] as List<dynamic>?) ?? <dynamic>[];
+    final List<dynamic> portfolioVideos =
+        (d['portfolio_videos'] as List<dynamic>?) ?? <dynamic>[];
 
     final ColorScheme cs = Theme.of(context).colorScheme;
 
@@ -238,7 +247,11 @@ class _ProviderDetailScreenState
           controller: _tabCtrl,
           children: <Widget>[
             // ── About ──────────────────────────────────────────────────────
-            _AboutTab(description: description),
+            _AboutTab(
+              description: description,
+              portfolioImages: portfolioImages,
+              portfolioVideos: portfolioVideos,
+            ),
 
             // ── Services ───────────────────────────────────────────────────
             _ServicesTab(services: services),
@@ -436,23 +449,111 @@ class _RatingPill extends StatelessWidget {
 // ── About tab ─────────────────────────────────────────────────────────────────
 
 class _AboutTab extends StatelessWidget {
-  const _AboutTab({required this.description});
+  const _AboutTab({
+    required this.description,
+    this.portfolioImages = const <dynamic>[],
+    this.portfolioVideos = const <dynamic>[],
+  });
 
   final String description;
+  final List<dynamic> portfolioImages;
+  final List<dynamic> portfolioVideos;
 
   @override
   Widget build(BuildContext context) {
+    if (description.isEmpty && portfolioImages.isEmpty && portfolioVideos.isEmpty) {
+      return const _EmptyTabMessage(message: 'No description provided.');
+    }
+
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
-      child: description.isNotEmpty
-          ? Text(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          if (description.isNotEmpty)
+            Text(
               description,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                     height: 1.6,
                     color: Theme.of(context).colorScheme.onSurface,
                   ),
-            )
-          : const _EmptyTabMessage(message: 'No description provided.'),
+            ),
+          if (portfolioImages.isNotEmpty || portfolioVideos.isNotEmpty) ...<Widget>[
+            if (description.isNotEmpty) const SizedBox(height: 24),
+            Text(
+              'Our Work',
+              style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w800,
+                    color: Theme.of(context).colorScheme.onSurface,
+                  ),
+            ),
+            const SizedBox(height: 10),
+            if (portfolioImages.isNotEmpty)
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: portfolioImages.map((dynamic img) {
+                  final String? url = ApiEndpoints.resolveImageUrl(img.toString());
+                  return ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: SizedBox(
+                      width: 100,
+                      height: 100,
+                      child: url != null
+                          ? CachedNetworkImage(imageUrl: url, fit: BoxFit.cover)
+                          : Container(color: AppTheme.primaryLight.withValues(alpha: 0.1)),
+                    ),
+                  );
+                }).toList(),
+              ),
+            if (portfolioVideos.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 12),
+              _PortfolioVideoThumb(
+                url: ApiEndpoints.resolveImageUrl(portfolioVideos.first.toString()),
+              ),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// A simple tap-to-open video placeholder — this app has no bundled video
+/// player package, so playback opens the file in an external viewer instead
+/// of an in-app player.
+class _PortfolioVideoThumb extends StatelessWidget {
+  const _PortfolioVideoThumb({required this.url});
+
+  final String? url;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppTheme.seedColor.withValues(alpha: 0.08),
+      borderRadius: BorderRadius.circular(10),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: url == null
+            ? null
+            : () => launchUrl(Uri.parse(url!), mode: LaunchMode.externalApplication),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+          child: Row(
+            children: <Widget>[
+              const Icon(Icons.play_circle_fill_rounded, color: AppTheme.seedColor, size: 32),
+              const SizedBox(width: 10),
+              const Expanded(
+                child: Text(
+                  'Watch video',
+                  style: TextStyle(fontWeight: FontWeight.w700, color: AppTheme.seedColor),
+                ),
+              ),
+              const Icon(Icons.open_in_new_rounded, size: 16, color: AppTheme.seedColor),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -480,7 +581,7 @@ class _ServicesTab extends StatelessWidget {
         return _ServiceListingCard(
           data: item,
           onTap: () {
-            final int? id = item['id'] as int?;
+            final int? id = int.tryParse(item['id']?.toString() ?? '');
             if (id != null) context.push('/seeker/listing/$id');
           },
         );
@@ -498,11 +599,16 @@ class _ServiceListingCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
-    final String? imageUrl = data['image_url'] as String?;
+    final dynamic imagesRaw = data['images'];
+    final List<dynamic> images = imagesRaw is List ? imagesRaw : <dynamic>[];
+    final String? imageUrl = images.isNotEmpty
+        ? ApiEndpoints.resolveImageUrl(images.first?.toString())
+        : null;
     final String title = (data['title'] as String?) ?? 'Untitled';
-    final num price = (data['price'] as num?) ?? 0;
-    final bool isEco = (data['is_eco_friendly'] as bool?) ?? false;
-    final bool isEmergency = (data['is_emergency'] as bool?) ?? false;
+    final num price = double.tryParse(data['price']?.toString() ?? '') ?? 0;
+    final bool isEco = data['is_eco_friendly'] == true;
+    // PHP returns is_emergency_available, not is_emergency.
+    final bool isEmergency = data['is_emergency_available'] == true;
 
     final String priceStr =
         NumberFormat.currency(locale: 'en_PH', symbol: '₱').format(price);
@@ -660,11 +766,16 @@ class _ReviewCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
-    final int rating = (data['rating'] as int?) ?? 0;
-    final String comment = (data['comment'] as String?) ?? '';
-    final String reviewer =
-        (data['reviewer_name'] as String?) ?? 'Anonymous';
-    final String? imageUrl = data['image_url'] as String?;
+    final int rating = int.tryParse(data['rating']?.toString() ?? '') ?? 0;
+    // PHP returns feedback, not comment; first_name/last_name, not a
+    // combined reviewer_name; feedback_image, not image_url.
+    final String comment = (data['feedback'] as String?) ?? '';
+    final String joinedName = <String?>[
+      data['first_name']?.toString(),
+      data['last_name']?.toString(),
+    ].where((String? s) => s != null && s.isNotEmpty).join(' ');
+    final String reviewer = joinedName.isEmpty ? 'Anonymous' : joinedName;
+    final String? imageUrl = ApiEndpoints.resolveImageUrl(data['feedback_image'] as String?);
 
     return Container(
       padding: const EdgeInsets.all(14),

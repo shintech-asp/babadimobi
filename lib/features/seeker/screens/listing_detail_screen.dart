@@ -154,6 +154,17 @@ class _ListingDetailScreenState extends ConsumerState<ListingDetailScreen> {
     final String providerAddress = (listing['provider_address'] ?? '').toString().trim();
     final String providerDescription = (listing['provider_description'] ?? '').toString().trim();
     final String priceFmt = NumberFormat.currency(locale: 'fil_PH', symbol: '₱').format(price);
+    final int? duration = int.tryParse((listing['duration'] ?? '').toString());
+    final String durationUnit = (listing['duration_unit'] ?? 'hour').toString();
+    final String equipmentNotes = (listing['equipment_notes'] ?? '').toString().trim();
+    const Map<String, String> durationUnitLabels = <String, String>{
+      'minute': 'min',
+      'hour': 'hr',
+      'day': 'day',
+    };
+    final String? durationLabel = duration != null && duration > 0
+        ? '$duration ${durationUnitLabels[durationUnit] ?? durationUnit}${duration != 1 ? 's' : ''}'
+        : null;
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle.light,
@@ -340,6 +351,24 @@ class _ListingDetailScreenState extends ConsumerState<ListingDetailScreen> {
                                 color: AppTheme.navy,
                                 height: 1.6,
                               ),
+                            ),
+                          ),
+                          const Divider(),
+                        ],
+
+                        // ── Service details (duration/equipment) ──────────────────
+                        if (durationLabel != null || equipmentNotes.isNotEmpty) ...<Widget>[
+                          _Section(
+                            title: 'Service Details',
+                            child: Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: <Widget>[
+                                if (durationLabel != null)
+                                  _InfoChip(icon: Icons.schedule_rounded, label: durationLabel),
+                                if (equipmentNotes.isNotEmpty)
+                                  _InfoChip(icon: Icons.build_rounded, label: equipmentNotes),
+                              ],
                             ),
                           ),
                           const Divider(),

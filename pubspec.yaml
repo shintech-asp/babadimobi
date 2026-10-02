@@ -1,7 +1,7 @@
 name: pestify_flutter
 description: Pestify — pest control service marketplace mobile app.
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.0+2
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -24,6 +24,7 @@ dependencies:
 
   # Payments & QR
   webview_flutter: ^4.7.0
+  webview_flutter_web: ^0.2.3+4
   qr_flutter: ^4.1.0
   mobile_scanner: ^5.2.3
 
@@ -48,3 +49,4 @@ flutter:
   uses-material-design: true
   assets:
     - assets/images/
+    - assets/leaflet/

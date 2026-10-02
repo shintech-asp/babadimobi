@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body, #map { width: 100%; height: 100%; }
+  #map { position: relative; }
+  #crosshair {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 32px; height: 32px;
+    pointer-events: none; z-index: 1000;
+    display: none;
+  }
+</style>
+<link rel="stylesheet" href="leaflet.css"/>
+</head>
+<body>
+<div id="map"></div>
+<div id="crosshair">
+  <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="16" cy="16" r="14" stroke="#2E8B57" stroke-width="3" fill="white" fill-opacity="0.8"/>
+    <line x1="16" y1="4" x2="16" y2="28" stroke="#2E8B57" stroke-width="2"/>
+    <line x1="4" y1="16" x2="28" y2="16" stroke="#2E8B57" stroke-width="2"/>
+  </svg>
+</div>
+<script src="leaflet.js"></script>
+<script>
+var map = L.map('map').setView([14.4791, 120.8970], 12);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors',
+  maxZoom: 19
+}).addTo(map);
+
+// Cavite province, Philippines — real administrative boundary polygon,
+// simplified from OSM/Nominatim's official outline (relation 1503544; ~3500
+// points reduced to ~230 via Douglas-Peucker, epsilon=0.001°) down to a size
+// reasonable to embed here. Keeps pin placement (tap + drag) inside the
+// actual province shape, matching the "Cavite only" rule already enforced
+// on the address text field elsewhere (see book_service_screen.dart's
+// address validator and the PHP backend's stripos($address,'cavite')
+// check). A plain bounding-box rectangle was tried first and rejected: it
+// let points well outside Cavite through at the corners (e.g. Pasay, which
+// sits just north of the Bacoor border but still inside a straight-line
+// box), because Cavite's real northern/eastern edge is irregular, not
+// straight — verified live on a real device before switching to this.
+var CAVITE_POLYGON = [[14.2875,120.416],[14.2723,120.432],[14.2596,120.45],[14.2489,120.449],[14.2405,120.474],[14.2283,120.543],[14.2222,120.567],[14.2227,120.588],[14.2117,120.612],[14.215,120.625],[14.2156,120.635],[14.2235,120.631],[14.2209,120.639],[14.2163,120.645],[14.2143,120.671],[14.2095,120.673],[14.2041,120.685],[14.2,120.684],[14.1926,120.687],[14.1858,120.686],[14.1809,120.687],[14.1717,120.678],[14.1706,120.698],[14.1588,120.711],[14.1538,120.708],[14.146,120.708],[14.1478,120.714],[14.1413,120.72],[14.1385,120.734],[14.1366,120.734],[14.1365,120.736],[14.1336,120.737],[14.1347,120.739],[14.1334,120.741],[14.1357,120.743],[14.1378,120.75],[14.1363,120.751],[14.1372,120.754],[14.1348,120.76],[14.1358,120.765],[14.1331,120.769],[14.1336,120.772],[14.1298,120.777],[14.1276,120.776],[14.1207,120.781],[14.1171,120.781],[14.1111,120.787],[14.0974,120.793],[14.1048,120.804],[14.1047,120.808],[14.1024,120.817],[14.0927,120.83],[14.0889,120.839],[14.0857,120.842],[14.0815,120.841],[14.077,120.845],[14.0706,120.843],[14.0679,120.845],[14.0594,120.844],[14.0569,120.847],[14.0644,120.848],[14.0694,120.857],[14.0755,120.862],[14.0774,120.869],[14.0838,120.878],[14.0858,120.889],[14.088,120.894],[14.0843,120.897],[14.0763,120.899],[14.0778,120.901],[14.0807,120.92],[14.0796,120.923],[14.0818,120.922],[14.0818,120.926],[14.0844,120.925],[14.0824,120.929],[14.0789,120.929],[14.0793,120.934],[14.0832,120.936],[14.0848,120.938],[14.0847,120.944],[14.0916,120.957],[14.0912,120.961],[14.0951,120.965],[14.096,120.969],[14.102,120.976],[14.1038,120.976],[14.1042,120.98],[14.1121,120.985],[14.1121,120.992],[14.1105,120.993],[14.1114,120.995],[14.1136,120.994],[14.1205,121.004],[14.1224,121.012],[14.1268,121.016],[14.1276,121.02],[14.1289,121.02],[14.1313,121.025],[14.1339,121.025],[14.1337,121.032],[14.1381,121.035],[14.1389,121.038],[14.1423,121.04],[14.1421,121.044],[14.1459,121.047],[14.1459,121.049],[14.15,121.047],[14.1523,121.05],[14.1541,121.049],[14.1531,121.048],[14.157,121.046],[14.1512,121.039],[14.1538,121.037],[14.1547,121.03],[14.1522,121.028],[14.1524,121.026],[14.1575,121.023],[14.1623,121.024],[14.1668,121.02],[14.1669,121.018],[14.1705,121.017],[14.1764,121.019],[14.1798,121.023],[14.1836,121.023],[14.1919,121.03],[14.1969,121.03],[14.1975,121.031],[14.2053,121.033],[14.2067,121.039],[14.2106,121.037],[14.2144,121.042],[14.2136,121.043],[14.2173,121.047],[14.2172,121.051],[14.2284,121.047],[14.2343,121.051],[14.2471,121.056],[14.252,121.054],[14.2567,121.054],[14.254,121.053],[14.2544,121.047],[14.25,121.042],[14.2494,121.037],[14.2544,121.036],[14.2623,121.041],[14.271,121.039],[14.2742,121.04],[14.2764,121.045],[14.2819,121.046],[14.2836,121.048],[14.288,121.047],[14.2929,121.049],[14.2953,121.051],[14.2949,121.055],[14.3067,121.062],[14.3088,121.062],[14.3099,121.063],[14.3111,121.062],[14.3132,121.067],[14.3234,121.07],[14.3252,121.076],[14.3279,121.078],[14.3291,121.068],[14.3222,121.059],[14.3253,121.056],[14.3281,121.047],[14.3263,121.042],[14.3236,121.039],[14.3289,121.039],[14.3324,121.041],[14.3345,121.032],[14.3253,121.022],[14.3241,121.015],[14.322,121.013],[14.3215,121.011],[14.3263,121.007],[14.3411,121.008],[14.3467,121.005],[14.3498,121.007],[14.3508,121.005],[14.3556,121.008],[14.37,121.007],[14.3731,121.01],[14.3803,121.012],[14.3839,121.008],[14.3875,121.007],[14.3906,121.008],[14.394,121.002],[14.3992,121.002],[14.4054,120.998],[14.4057,120.995],[14.411,120.995],[14.4161,120.99],[14.4218,120.99],[14.4227,120.987],[14.4263,120.987],[14.4261,120.986],[14.4294,120.984],[14.4335,120.984],[14.4351,120.979],[14.4393,120.974],[14.4467,120.97],[14.4548,120.97],[14.4654,120.966],[14.4682,120.97],[14.4698,120.968],[14.4715,120.968],[14.4716,120.972],[14.4756,120.97],[14.4939,120.943],[14.5011,120.947],[14.534,120.938],[14.5508,120.91],[14.5578,120.894],[14.5856,120.793],[14.5695,120.779],[14.556,120.771],[14.5246,120.757],[14.5161,120.751],[14.4694,120.733],[14.4453,120.715],[14.4419,120.687],[14.4328,120.636],[14.4248,120.607],[14.4166,120.591],[14.4075,120.559],[14.3995,120.54],[14.4,120.522],[14.3642,120.476],[14.2875,120.416]];
+
+// Ray-casting point-in-polygon test — standard algorithm, no library
+// needed for a single simple (non-self-intersecting) polygon like this.
+function pointInCavite(lat, lng) {
+  var inside = false;
+  for (var i = 0, j = CAVITE_POLYGON.length - 1; i < CAVITE_POLYGON.length; j = i++) {
+    var lat_i = CAVITE_POLYGON[i][0], lng_i = CAVITE_POLYGON[i][1];
+    var lat_j = CAVITE_POLYGON[j][0], lng_j = CAVITE_POLYGON[j][1];
+    var intersects = ((lat_i > lat) !== (lat_j > lat)) &&
+      (lng < (lng_j - lng_i) * (lat - lat_i) / (lat_j - lat_i) + lng_i);
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+// Pan restriction only needs a loose rectangle around the polygon — doesn't
+// need to be precise, just keeps the user from scrolling off to an
+// unrelated part of the country entirely.
+var polyLats = CAVITE_POLYGON.map(function(p) { return p[0]; });
+var polyLngs = CAVITE_POLYGON.map(function(p) { return p[1]; });
+map.setMaxBounds(L.latLngBounds(
+  L.latLng(Math.min.apply(null, polyLats), Math.min.apply(null, polyLngs)),
+  L.latLng(Math.max.apply(null, polyLats), Math.max.apply(null, polyLngs))
+).pad(0.1));
+map.setMinZoom(10);
+
+// Tell Flutter the map itself is interactive as soon as Leaflet has laid it
+// out — deliberately NOT waiting for WebView's onPageFinished/load event,
+// which on Android doesn't fire until every network request the page
+// issued (including each tile image fetch) has finished or timed out. With
+// no real internet, tile DNS lookups fail one by one and onPageFinished can
+// end up firing 20+ seconds late even though the map was actually ready
+// almost instantly — this channel message reports the truth instead.
+map.whenReady(function() {
+  FlutterMapChannel.postMessage('ready');
+});
+
+var marker = null;
+// Bigger than the previous 30px icon specifically so it's easier to grab
+// and drag on a touchscreen — a small marker made fine-tuning the pin
+// position fiddly, since the finger has to land within the icon's own
+// pixel bounds to start a drag.
+var greenIcon = L.divIcon({
+  className: '',
+  html: '<div style="width:44px;height:44px;background:#2E8B57;border:3px solid white;border-radius:50% 50% 50% 0;transform:rotate(-45deg);box-shadow:0 2px 8px rgba(0,0,0,0.3);"></div>',
+  iconSize: [44, 44],
+  iconAnchor: [22, 44],
+});
+
+function placeMarker(lat, lng) {
+  if (marker) { map.removeLayer(marker); }
+  marker = L.marker([lat, lng], {icon: greenIcon, draggable: true}).addTo(map);
+  var lastValidLatLng = L.latLng(lat, lng);
+  marker.on('drag', function(e) {
+    // With an irregular polygon (not a rectangle) there's no cheap way to
+    // "clamp to the nearest edge point" mid-drag, so instead: remember the
+    // last position that was still inside Cavite, and snap straight back
+    // to it the instant a drag step lands outside. The pin still tracks
+    // the finger smoothly right up to the boundary, it just refuses to
+    // cross it.
+    var pos = e.target.getLatLng();
+    if (pointInCavite(pos.lat, pos.lng)) {
+      lastValidLatLng = pos;
+    } else {
+      e.target.setLatLng(lastValidLatLng);
+    }
+  });
+  marker.on('dragend', function(e) {
+    var pos = e.target.getLatLng();
+    sendCoords(pos.lat, pos.lng);
+  });
+  sendCoords(lat, lng);
+}
+
+function sendCoords(lat, lng) {
+  FlutterMapChannel.postMessage(lat.toFixed(6) + ',' + lng.toFixed(6));
+  fetch('https://nominatim.openstreetmap.org/reverse?lat=' + lat + '&lon=' + lng + '&format=json')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var addr = d.display_name || '';
+      FlutterMapChannel.postMessage('addr:' + addr);
+    })
+    .catch(function() {});
+}
+
+map.on('click', function(e) {
+  if (!pointInCavite(e.latlng.lat, e.latlng.lng)) {
+    FlutterMapChannel.postMessage('outside_cavite');
+    return;
+  }
+  placeMarker(e.latlng.lat, e.latlng.lng);
+});
+</script>
+</body>
+</html>

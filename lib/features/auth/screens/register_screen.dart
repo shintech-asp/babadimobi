@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:pestify_flutter/core/api/api_endpoints.dart';
 import 'package:pestify_flutter/features/auth/auth_api.dart';
 import 'package:pestify_flutter/shared/widgets/error_banner.dart';
 import 'package:pestify_flutter/shared/widgets/loading_button.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 /// Registration screen for new seeker accounts.
 ///
@@ -21,6 +24,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
 
   final TextEditingController _firstNameCtrl = TextEditingController();
   final TextEditingController _lastNameCtrl = TextEditingController();
+  final TextEditingController _suffixCtrl = TextEditingController();
   final TextEditingController _emailCtrl = TextEditingController();
   final TextEditingController _phoneCtrl = TextEditingController();
   final TextEditingController _passwordCtrl = TextEditingController();
@@ -35,6 +39,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
   void dispose() {
     _firstNameCtrl.dispose();
     _lastNameCtrl.dispose();
+    _suffixCtrl.dispose();
     _emailCtrl.dispose();
     _phoneCtrl.dispose();
     _passwordCtrl.dispose();
@@ -72,6 +77,11 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
 
   String? _validatePhone(String? v) {
     if (v == null || v.trim().isEmpty) return 'Phone number is required';
+    // Matches the server-side check in api/v1/auth/register.php: PH mobile
+    // numbers are 11 digits starting with 09.
+    if (!RegExp(r'^09\d{9}$').hasMatch(v.trim())) {
+      return 'Enter a valid 11-digit mobile number starting with 09';
+    }
     return null;
   }
 
@@ -84,9 +94,11 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
     setState(() => _isLoading = true);
 
     try {
+      final String suffix = _suffixCtrl.text.trim();
       await ref.read(authApiProvider).register(
             firstName: _firstNameCtrl.text.trim(),
             lastName: _lastNameCtrl.text.trim(),
+            suffix: suffix.isEmpty ? null : suffix,
             email: _emailCtrl.text.trim(),
             password: _passwordCtrl.text,
             phone: _phoneCtrl.text.trim(),
@@ -166,6 +178,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                 Row(
                   children: [
                     Expanded(
+                      flex: 3,
                       child: TextFormField(
                         controller: _firstNameCtrl,
                         textCapitalization: TextCapitalization.words,
@@ -178,6 +191,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                     ),
                     const SizedBox(width: 12),
                     Expanded(
+                      flex: 3,
                       child: TextFormField(
                         controller: _lastNameCtrl,
                         textCapitalization: TextCapitalization.words,
@@ -186,6 +200,21 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                           labelText: 'Last name',
                         ),
                         validator: (v) => _validateRequired(v, 'Last name'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      flex: 2,
+                      child: TextFormField(
+                        controller: _suffixCtrl,
+                        textCapitalization: TextCapitalization.words,
+                        textInputAction: TextInputAction.next,
+                        maxLength: 10,
+                        decoration: const InputDecoration(
+                          labelText: 'Suffix',
+                          hintText: 'Jr., III',
+                          counterText: '',
+                        ),
                       ),
                     ),
                   ],
@@ -213,6 +242,10 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                   controller: _phoneCtrl,
                   keyboardType: TextInputType.phone,
                   textInputAction: TextInputAction.next,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                    LengthLimitingTextInputFormatter(11),
+                  ],
                   decoration: const InputDecoration(
                     labelText: 'Phone number',
                     prefixIcon: Icon(Icons.phone_outlined),
@@ -312,6 +345,54 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                       ),
                     ),
                   ],
+                ),
+
+                const SizedBox(height: 16),
+
+                // ── Provider sign-up redirect ────────────────────────────────
+                // Provider registration needs business documents + Cavite
+                // geofencing + admin review (see provider/provider-setup.php
+                // on the web) — handled only on the website, not in-app, so
+                // this flow isn't duplicated and left to drift out of sync.
+                Center(
+                  child: Wrap(
+                    alignment: WrapAlignment.center,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Text(
+                        'Are you a pest control provider?',
+                        style: Theme.of(
+                          context,
+                        ).textTheme.bodySmall?.copyWith(
+                          color: cs.onSurfaceVariant,
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () async {
+                          final Uri uri = Uri.parse(
+                            '${ApiEndpoints.siteRoot}/auth/register.php',
+                          );
+                          await launchUrl(
+                            uri,
+                            mode: LaunchMode.externalApplication,
+                          );
+                        },
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.only(left: 6),
+                          minimumSize: Size.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        child: Text(
+                          'Register on our website',
+                          style: TextStyle(
+                            color: cs.primary,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
 
                 const SizedBox(height: 32),

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
+import 'package:pestify_flutter/core/state/bookings_refresh.dart';
 import 'package:pestify_flutter/core/theme/app_theme.dart';
 import 'package:pestify_flutter/features/seeker/seeker_api.dart';
 import 'package:pestify_flutter/shared/widgets/booking_status_chip.dart';
@@ -120,13 +121,41 @@ class _BookingTabViewState extends ConsumerState<_BookingTabView>
     return 'Could not load bookings. Pull down to retry.';
   }
 
+  /// Awaits the new fetch (not just assigns it) so [RefreshIndicator]'s own
+  /// spinner stays up until the data has actually arrived, instead of
+  /// dismissing the instant this function returns — which made a successful
+  /// pull-to-refresh look like it hadn't done anything.
   Future<void> _refresh() async {
-    setState(() => _future = _fetchBookings());
+    final Future<List<dynamic>> next = _fetchBookings();
+    setState(() {
+      _future = next;
+    });
+    try {
+      await next;
+    } catch (_) {
+      // FutureBuilder surfaces the error via snapshot.hasError.
+    }
+  }
+
+  /// Pushes the booking detail screen and refetches this tab once the user
+  /// returns — a booking's status can change while its detail screen is
+  /// open (e.g. confirming completion), and this tab's list would otherwise
+  /// stay stale until a manual pull-to-refresh.
+  Future<void> _openBooking(int id) async {
+    await context.push('/seeker/booking/$id');
+    if (!mounted) return;
+    _refresh();
   }
 
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    // Refetch whenever any screen signals a booking was created/mutated —
+    // see bookings_refresh.dart's doc comment for why this tab can't rely
+    // on pull-to-refresh or a "return from push" event alone.
+    ref.listen<int>(bookingsRefreshTick, (int? previous, int next) {
+      if (previous != next) _refresh();
+    });
     return FutureBuilder<List<dynamic>>(
       future: _future,
       builder: (BuildContext ctx, AsyncSnapshot<List<dynamic>> snapshot) {
@@ -162,7 +191,7 @@ class _BookingTabViewState extends ConsumerState<_BookingTabView>
             itemBuilder: (BuildContext ctx, int index) {
               final dynamic raw = bookings[index];
               if (raw is! Map<String, dynamic>) return const SizedBox.shrink();
-              return _BookingCard(booking: raw);
+              return _BookingCard(booking: raw, onOpen: _openBooking);
             },
           ),
         );
@@ -183,9 +212,10 @@ class _BookingTabViewState extends ConsumerState<_BookingTabView>
 // ── Booking card ──────────────────────────────────────────────────────────────
 
 class _BookingCard extends StatelessWidget {
-  const _BookingCard({required this.booking});
+  const _BookingCard({required this.booking, required this.onOpen});
 
   final Map<String, dynamic> booking;
+  final ValueChanged<int> onOpen;
 
   String _formatDate(String? raw) {
     if (raw == null || raw.isEmpty) return '—';
@@ -206,17 +236,37 @@ class _BookingCard extends StatelessWidget {
         booking['service_name']?.toString() ?? 'Service';
     final String providerName =
         booking['provider_name']?.toString() ?? 'Provider';
-    final String date = _formatDate(booking['preferred_date']?.toString());
     final String status = booking['status']?.toString() ?? 'pending';
+    final bool requiresInspection = booking['requires_inspection'] == true ||
+        booking['requires_inspection'] == 1 ||
+        booking['requires_inspection'] == '1';
+    final String inspectionAgreedAt =
+        booking['inspection_agreed_at']?.toString().trim() ?? '';
+    final bool awaitingInspection = requiresInspection &&
+        status == 'accepted' &&
+        (inspectionAgreedAt.isEmpty ||
+            inspectionAgreedAt == '0000-00-00 00:00:00');
+    // While still awaiting inspection this is only a site-visit date, not a
+    // confirmed service date — label it so it isn't misread as one.
+    final String date = (awaitingInspection ? 'Inspection: ' : '') +
+        _formatDate(
+          (awaitingInspection
+                  ? (booking['inspection_date'] ?? booking['preferred_date'])
+                  : booking['preferred_date'])
+              ?.toString(),
+        );
+    // MySQL can store the zero-date sentinel instead of NULL on older rows.
+    final String dualVerifiedAt =
+        booking['dual_verified_at']?.toString().trim() ?? '';
+    final bool hasStarted =
+        dualVerifiedAt.isNotEmpty && dualVerifiedAt != '0000-00-00 00:00:00';
     final dynamic rawId = booking['id'] ?? booking['avail_id'];
     final int? id = rawId is int ? rawId : int.tryParse(rawId?.toString() ?? '');
 
     return Card(
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: id != null
-            ? () => context.push('/seeker/booking/$id')
-            : null,
+        onTap: id != null ? () => onOpen(id) : null,
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
@@ -267,7 +317,7 @@ class _BookingCard extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 8),
-                  BookingStatusChip(status: status),
+                  BookingStatusChip(status: status, hasStarted: hasStarted),
                 ],
               ),
               const SizedBox(height: 12),
@@ -276,7 +326,9 @@ class _BookingCard extends StatelessWidget {
               Row(
                 children: <Widget>[
                   Icon(
-                    Icons.calendar_today_outlined,
+                    awaitingInspection
+                        ? Icons.search_rounded
+                        : Icons.calendar_today_outlined,
                     size: 13,
                     color: cs.onSurfaceVariant,
                   ),
@@ -291,7 +343,7 @@ class _BookingCard extends StatelessWidget {
                   const Spacer(),
                   if (id != null)
                     TextButton.icon(
-                      onPressed: () => context.push('/seeker/booking/$id'),
+                      onPressed: () => onOpen(id),
                       icon: const Icon(Icons.chevron_right, size: 16),
                       label: const Text('View'),
                       style: TextButton.styleFrom(
@@ -320,7 +372,10 @@ class _EmptyState extends StatelessWidget {
   });
 
   final String statusGroup;
-  final VoidCallback onRefresh;
+  // Must actually return the in-flight fetch (not VoidCallback) — otherwise
+  // RefreshIndicator below has no future to await and dismisses its spinner
+  // before the fetch completes. See _refresh()'s doc comment above.
+  final Future<void> Function() onRefresh;
 
   String get _message => switch (statusGroup) {
         'active' => 'No active bookings.\nBook a service to get started.',
@@ -333,7 +388,7 @@ class _EmptyState extends StatelessWidget {
   Widget build(BuildContext context) {
     return RefreshIndicator(
       color: AppTheme.primary,
-      onRefresh: () async => onRefresh(),
+      onRefresh: onRefresh,
       child: SingleChildScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
         child: SizedBox(

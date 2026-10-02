@@ -18,28 +18,31 @@ class AuthApi {
 
   // ── login ──────────────────────────────────────────────────────────────────
 
-  /// Authenticates a user of any type (seeker, provider, admin, portal staff).
+  /// Authenticates a user of **any** role — seeker, provider, admin, or
+  /// portal staff — through one centralized call. Mirrors the web app's
+  /// shared `auth/login.php` login page: the PHP endpoint checks
+  /// `admin_users` → `provider_staff` (portal staff) → `users` (seeker/
+  /// provider) in that order, so there is no separate admin/portal login
+  /// screen or endpoint to call — this is the only one.
   ///
   /// PHP endpoint: `POST auth/login.php`
   ///
-  /// Request body:
+  /// Request body (the field is named `email` for backward compatibility,
+  /// but accepts a username for the admin/portal-staff tiers too):
   /// ```json
-  /// { "username_or_email": "...", "password": "..." }
+  /// { "email": "...", "password": "..." }
   /// ```
   ///
-  /// Success response shape (inside `data`):
-  /// ```json
-  /// {
-  ///   "token": "<jwt>",
-  ///   "user_type": "seeker",
-  ///   "user": { "id": 1, "first_name": "Juan", "email": "..." }
-  /// }
-  /// ```
+  /// Response is **flat** (not nested under `data`) and its shape depends on
+  /// which tier matched — always `token`; `user` for seeker/provider,
+  /// `admin` + `must_change_password` for admin, `staff` +
+  /// `must_change_password` for portal staff. The caller only needs `token`
+  /// to route correctly — [AuthState.userType] is decoded straight from the
+  /// JWT, not from this body.
   ///
-  /// Returns the full `data` map so the caller can hand the token to
-  /// [AuthNotifier.login] and read any user fields it needs.
-  ///
-  /// Throws [Exception] with the PHP-provided message on failure.
+  /// Throws [Exception] with the PHP-provided message on failure — the
+  /// message is always the generic "Invalid credentials" (matching the web),
+  /// never reveals which tier (if any) the identifier matched.
   Future<Map<String, dynamic>> login({
     required String usernameOrEmail,
     required String password,
@@ -93,22 +96,29 @@ class AuthApi {
     required String email,
     required String password,
     required String phone,
+    String? suffix,
   }) async {
     final Response<dynamic> res = await _dio.post(
       ApiEndpoints.register,
       data: <String, String>{
         'first_name': firstName,
         'last_name': lastName,
+        if (suffix != null && suffix.isNotEmpty) 'suffix': suffix,
         'email': email,
         'password': password,
         'phone': phone,
+        // Mobile self-registration is seeker-only by design — provider
+        // sign-up requires business documents + Cavite geofencing + admin
+        // review and is handled only on the website. See
+        // api/v1/auth/register.php, which rejects any other value.
+        'user_type': 'seeker',
       },
     );
 
     final dynamic body = res.data;
     if (body is Map<String, dynamic>) {
       if (body['ok'] == true) return;
-      final dynamic msg = body['message'];
+      final dynamic msg = body['error'] ?? body['message'];
       throw Exception(
         msg is String && msg.isNotEmpty ? msg : 'Registration failed.',
       );

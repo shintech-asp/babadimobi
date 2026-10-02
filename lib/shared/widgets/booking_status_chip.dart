@@ -1,12 +1,20 @@
 import 'package:flutter/material.dart';
+import 'package:pestify_flutter/shared/utils/booking_status_utils.dart';
 
 class BookingStatusChip extends StatelessWidget {
   const BookingStatusChip({
     super.key,
     required this.status,
+    this.hasStarted = true,
   });
 
   final String status;
+
+  /// Whether this booking has passed the service-day handshake (derived
+  /// from `dual_verified_at`). Disambiguates the legacy
+  /// `waiting_provider_confirmation` spelling, which the provider-portal
+  /// CRM also uses to mean "just accepted" — see [normalizeBookingStatus].
+  final bool hasStarted;
 
   static Color _colorForStatus(String status) {
     switch (status.toLowerCase()) {
@@ -27,6 +35,10 @@ class BookingStatusChip extends StatelessWidget {
         return Colors.purple;
       case 'waiting_for_provider_confirmation':
         return Colors.deepPurple;
+      case 'awaiting_agreement':
+        return Colors.purple;
+      case 'revising':
+        return Colors.deepOrange;
       case 'completed':
         return Colors.green;
       case 'cancelled':
@@ -49,8 +61,10 @@ class BookingStatusChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = _colorForStatus(status);
-    final label = _labelForStatus(status);
+    final String normalized =
+        normalizeBookingStatus(status, hasStarted: hasStarted);
+    final color = _colorForStatus(normalized);
+    final label = _labelForStatus(normalized);
 
     return Chip(
       label: Text(

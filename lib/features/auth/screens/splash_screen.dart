@@ -34,7 +34,7 @@ class _SplashScreenState extends ConsumerState<SplashScreen> {
       final AuthState auth = ref.read(authProvider);
 
       if (!auth.isLoggedIn) {
-        context.go('/login');
+        context.go('/landing');
         return;
       }
 
@@ -75,6 +75,7 @@ class _SplashScreenState extends ConsumerState<SplashScreen> {
       case 'admin':
         context.go('/admin/dashboard');
       case 'portal_staff':
+      case 'portal_employee':
         context.go('/portal/dashboard');
       default:
         context.go('/login');

@@ -51,6 +51,20 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       final String token = data['token'] as String? ?? '';
       await ref.read(authProvider.notifier).login(token);
       if (!mounted) return;
+
+      // Only admin/portal-staff accounts can carry a temp password — the
+      // seeker/provider path never sends this field. No dedicated
+      // change-password screen is built yet, so this is a heads-up rather
+      // than a forced redirect.
+      if (data['must_change_password'] == true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('This account has a temporary password. Please change it soon.'),
+            backgroundColor: AppTheme.navy,
+          ),
+        );
+      }
+
       final String? userType = ref.read(authProvider).userType;
       _routeByUserType(userType);
     } catch (e) {
@@ -71,6 +85,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       case 'admin':
         context.go('/admin/dashboard');
       case 'portal_staff':
+      case 'portal_employee':
         context.go('/portal/dashboard');
       default:
         context.go('/seeker/home');
@@ -360,6 +375,33 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                       ),
                     ),
                   ),
+                ),
+              ),
+
+              // ── Back button ─────────────────────────────────────────────
+              // Login used to be the app's true entry point, so this screen
+              // never had a way back. Always shown now — pop back to
+              // whatever pushed this screen (e.g. landing's "Log In" button)
+              // when there's something to pop to, otherwise go to landing
+              // directly (e.g. after a logout, which replaces the whole
+              // stack via context.go('/login') and leaves nothing to pop).
+              // Placed LAST so it paints on top of the scrollable content
+              // above — a Stack child earlier in the list renders underneath
+              // later ones, and the scroll view's full-bounds drag handling
+              // was swallowing the tap before it ever reached this button.
+              Positioned(
+                top: topPad + 8,
+                left: 12,
+                child: IconButton(
+                  icon: const Icon(Icons.arrow_back_rounded, color: AppTheme.navy),
+                  tooltip: 'Back',
+                  onPressed: () {
+                    if (context.canPop()) {
+                      context.pop();
+                    } else {
+                      context.go('/landing');
+                    }
+                  },
                 ),
               ),
             ],

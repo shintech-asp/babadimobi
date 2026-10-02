@@ -43,6 +43,81 @@ class SeekerApi {
     return Exception(raw.isNotEmpty ? raw : 'An unexpected error occurred.');
   }
 
+  // ── Decision Support System ("Find My Match") ────────────────────────────────
+  //
+  // recommend.php / recommend-options.php require no auth — they work for
+  // guests exactly like the web version does; only booking a listing
+  // (createBooking below) requires login. Dio's JWT interceptor still
+  // attaches a token when one exists, which the endpoint uses only to
+  // attribute the logged query — it never gates access on it.
+
+  /// Returns `{'cities': List<String>, 'min_price': double?, 'max_price': double?}`
+  /// for populating the Find My Match form. Categories are shared with the
+  /// rest of the app — fetch those via [getCategories].
+  Future<Map<String, dynamic>> getRecommendOptions() async {
+    try {
+      final Response<dynamic> res = await _dio.get(ApiEndpoints.recommendOptions);
+      final dynamic data = ApiClient.unwrap(res);
+      return data as Map<String, dynamic>;
+    } on DioException catch (e) {
+      throw _handleDio(e);
+    } on StateError catch (e) {
+      throw _handleStateError(e);
+    }
+  }
+
+  /// Returns the full category list (`id`, `name`, ...).
+  Future<List<dynamic>> getCategories() async {
+    try {
+      final Response<dynamic> res = await _dio.get(ApiEndpoints.categories);
+      final dynamic data = ApiClient.unwrap(res);
+      return data as List<dynamic>;
+    } on DioException catch (e) {
+      throw _handleDio(e);
+    } on StateError catch (e) {
+      throw _handleStateError(e);
+    }
+  }
+
+  /// Runs the DSS ranking pipeline. All parameters are optional — the
+  /// backend cascades free-text [needText] through a rule-based keyword
+  /// parser and, on low confidence, an LLM (English/Tagalog/Taglish) to
+  /// infer a category when [categoryId] isn't given directly.
+  ///
+  /// Returns the full body (not just `data`) — `getRankedListings`/etc.
+  /// callers want `data['results']`, `data['degraded']`,
+  /// `data['parsed_category_name']` all together.
+  Future<Map<String, dynamic>> getRecommendations({
+    String? needText,
+    int? categoryId,
+    double? budgetMax,
+    String urgency = 'flexible',
+    String priority = 'balanced',
+    bool ecoOnly = false,
+    String? city,
+  }) async {
+    try {
+      final Response<dynamic> res = await _dio.get(
+        ApiEndpoints.recommend,
+        queryParameters: <String, dynamic>{
+          if (needText != null && needText.isNotEmpty) 'need_text': needText,
+          if (categoryId != null) 'category_id': categoryId,
+          if (budgetMax != null) 'budget_max': budgetMax,
+          'urgency': urgency,
+          'priority': priority,
+          if (ecoOnly) 'eco': '1',
+          if (city != null && city.isNotEmpty) 'city': city,
+        },
+      );
+      final dynamic data = ApiClient.unwrap(res);
+      return data as Map<String, dynamic>;
+    } on DioException catch (e) {
+      throw _handleDio(e);
+    } on StateError catch (e) {
+      throw _handleStateError(e);
+    }
+  }
+
   // ── Browse ──────────────────────────────────────────────────────────────────
 
   /// Returns a paginated list of service listings.
@@ -113,14 +188,31 @@ class SeekerApi {
   }
 
   /// Returns the full profile of a single provider by [id].
+  ///
+  /// `providers/show.php` returns `{ ok: true, data: {...}, listings: [...],
+  /// reviews: [...] }` — like `getListingDetail()`/`getBookingDetail()`, the
+  /// sibling keys aren't inside `data`, so they're merged into the returned
+  /// map here (`listings` under the key `services`, matching what
+  /// `provider_detail_screen.dart` reads).
   Future<Map<String, dynamic>> getProviderDetail(int id) async {
     try {
       final Response<dynamic> res = await _dio.get(
         ApiEndpoints.providerDetail,
         queryParameters: <String, dynamic>{'id': id},
       );
-      final dynamic data = ApiClient.unwrap(res);
-      return data as Map<String, dynamic>;
+      final dynamic body = res.data;
+      if (body is Map<String, dynamic> && body['ok'] == true) {
+        final Map<String, dynamic> provider = Map<String, dynamic>.from(
+            (body['data'] as Map<String, dynamic>?) ?? <String, dynamic>{});
+        provider['services'] = body['listings'] ?? <dynamic>[];
+        provider['reviews'] = body['reviews'] ?? <dynamic>[];
+        return provider;
+      }
+      final String msg = (body is Map
+              ? (body['error'] ?? body['message'] ?? 'Server error')
+              : 'Server error')
+          .toString();
+      throw StateError(msg);
     } on DioException catch (e) {
       throw _handleDio(e);
     } on StateError catch (e) {
@@ -223,6 +315,105 @@ class SeekerApi {
     }
   }
 
+  /// Confirms the service was completed satisfactorily (full-payment path).
+  ///
+  /// Only valid while the booking's status is `waiting_for_seeker_confirmation`.
+  Future<void> confirmServiceComplete(int availId) async {
+    try {
+      final Response<dynamic> res = await _dio.post(
+        ApiEndpoints.confirmComplete,
+        data: <String, dynamic>{'avail_id': availId},
+      );
+      ApiClient.unwrap(res);
+    } on DioException catch (e) {
+      throw _handleDio(e);
+    } on StateError catch (e) {
+      throw _handleStateError(e);
+    }
+  }
+
+  /// Accepts or rejects a reschedule proposal made by the provider.
+  Future<void> respondToReschedule({
+    required int availId,
+    required bool accept,
+  }) async {
+    try {
+      final Response<dynamic> res = await _dio.post(
+        ApiEndpoints.rescheduleRespond,
+        data: <String, dynamic>{
+          'avail_id': availId,
+          'decision': accept ? 'accept' : 'reject',
+        },
+      );
+      ApiClient.unwrap(res);
+    } on DioException catch (e) {
+      throw _handleDio(e);
+    } on StateError catch (e) {
+      throw _handleStateError(e);
+    }
+  }
+
+  /// Responds to an inspection report on a booking sitting at
+  /// 'awaiting_agreement' — agree locks in the proposed price/working date
+  /// and returns the booking to 'accepted' (normal Pay Now flow picks it up
+  /// from there); request_changes requires [notes] and moves it to
+  /// 'revising', looping back to the provider for a new report. Mirrors
+  /// seeker/my-requests.php's "Agree & Schedule" / "Request Changes" buttons.
+  Future<void> respondToInspection({
+    required int bookingId,
+    required bool agree,
+    String? notes,
+  }) async {
+    try {
+      final Response<dynamic> res = await _dio.post(
+        ApiEndpoints.inspectionRespond,
+        data: <String, dynamic>{
+          'avail_id': bookingId,
+          'decision': agree ? 'agree' : 'request_changes',
+          if (!agree) 'notes': notes ?? '',
+        },
+      );
+      ApiClient.unwrap(res);
+    } on DioException catch (e) {
+      throw _handleDio(e);
+    } on StateError catch (e) {
+      throw _handleStateError(e);
+    }
+  }
+
+  /// Requests immediate ("Emergency Now") service on an accepted/preparing booking.
+  Future<Map<String, dynamic>> requestEmergencyNow(int availId) async {
+    try {
+      final Response<dynamic> res = await _dio.post(
+        ApiEndpoints.emergencyNow,
+        data: <String, dynamic>{'avail_id': availId},
+      );
+      final dynamic data = ApiClient.unwrap(res);
+      return data as Map<String, dynamic>;
+    } on DioException catch (e) {
+      throw _handleDio(e);
+    } on StateError catch (e) {
+      throw _handleStateError(e);
+    }
+  }
+
+  /// Re-opens a PayMongo checkout session for a booking whose initial
+  /// payment never completed. Returns a map with `checkout_url`.
+  Future<Map<String, dynamic>> retryPayment(int bookingId) async {
+    try {
+      final Response<dynamic> res = await _dio.post(
+        ApiEndpoints.retryPayment,
+        data: <String, dynamic>{'booking_id': bookingId},
+      );
+      final dynamic data = ApiClient.unwrap(res);
+      return data as Map<String, dynamic>;
+    } on DioException catch (e) {
+      throw _handleDio(e);
+    } on StateError catch (e) {
+      throw _handleStateError(e);
+    }
+  }
+
   /// Returns a paginated list of the seeker's bookings.
   ///
   /// [status] is an optional ENUM filter matching `availed_services.status`
@@ -268,6 +459,7 @@ class SeekerApi {
             (body['data'] as Map<String, dynamic>?) ?? <String, dynamic>{});
         final dynamic review = body['review'];
         if (review != null) booking['review'] = review;
+        booking['receipts'] = body['receipts'] ?? <dynamic>[];
         return booking;
       }
       final String msg = (body is Map
@@ -329,14 +521,16 @@ class SeekerApi {
     }
   }
 
-  /// Returns the remaining balance due for a partially-paid booking.
-  ///
-  /// Useful for cash/on-site payment flows where a deposit was taken upfront.
+  /// Opens (or re-opens) a PayMongo checkout session for a booking's
+  /// remaining balance. Despite the "get" name this is a POST — the PHP
+  /// endpoint creates a fresh checkout session on every call and only
+  /// accepts POST (`allow('POST')` in remaining-payment.php); calling it
+  /// with GET returns a 405.
   Future<Map<String, dynamic>> getRemainingPayment(int bookingId) async {
     try {
-      final Response<dynamic> res = await _dio.get(
+      final Response<dynamic> res = await _dio.post(
         ApiEndpoints.remainingPayment,
-        queryParameters: <String, dynamic>{'booking_id': bookingId},
+        data: <String, dynamic>{'booking_id': bookingId},
       );
       final dynamic data = ApiClient.unwrap(res);
       return data as Map<String, dynamic>;
@@ -370,7 +564,7 @@ class SeekerApi {
         final FormData formData = FormData.fromMap(<String, dynamic>{
           'avail_id': availId,
           'rating': rating,
-          'comment': comment,
+          'feedback': comment,
           'image': await MultipartFile.fromFile(
             image.path,
             filename: image.path.split(Platform.pathSeparator).last,
@@ -384,7 +578,7 @@ class SeekerApi {
           data: <String, dynamic>{
             'avail_id': availId,
             'rating': rating,
-            'comment': comment,
+            'feedback': comment,
           },
         );
       }
@@ -464,12 +658,17 @@ class SeekerApi {
     }
   }
 
-  // ── Messages ─────────────────────────────────────────────────────────────────
+  // ── Messages (transaction-scoped: one thread per booking) ──────────────────
+  //
+  // Mirrors the web's seeker/messages-seeker.php + transaction_chat_helper.php:
+  // every booking is a selectable thread (even with zero messages), a thread
+  // closes once its booking is completed/cancelled, and the header always
+  // carries the booking's service/status/price/payment context.
 
-  /// Returns the list of message conversations (one entry per provider).
-  Future<List<dynamic>> getMessages() async {
+  /// Returns one row per booking the seeker has ever had, each a chat thread.
+  Future<List<dynamic>> getBookingThreads() async {
     try {
-      final Response<dynamic> res = await _dio.get(ApiEndpoints.messages);
+      final Response<dynamic> res = await _dio.get(ApiEndpoints.bookingThreads);
       final dynamic data = ApiClient.unwrap(res);
       return data as List<dynamic>;
     } on DioException catch (e) {
@@ -479,16 +678,23 @@ class SeekerApi {
     }
   }
 
-  /// Returns the ordered message thread between the seeker and [providerId].
-  Future<List<dynamic>> getMessageThread(int providerId) async {
+  /// Returns `{'messages': List, 'booking': Map}` for one booking's thread.
+  /// Fetching also marks the seeker's unread messages on it as read.
+  Future<Map<String, dynamic>> getBookingThread(int bookingId) async {
     try {
       final Response<dynamic> res = await _dio.get(
-        ApiEndpoints.messageThread,
-        // thread.php reads $_GET['with'] — the user ID of the other party.
-        queryParameters: <String, dynamic>{'with': providerId},
+        ApiEndpoints.bookingThread,
+        queryParameters: <String, dynamic>{'booking': bookingId},
       );
-      final dynamic data = ApiClient.unwrap(res);
-      return data as List<dynamic>;
+      final dynamic body = res.data;
+      if (body is Map<String, dynamic> && body['ok'] == true) {
+        return <String, dynamic>{
+          'messages': body['data'] ?? <dynamic>[],
+          'booking': body['booking'] ?? <String, dynamic>{},
+        };
+      }
+      final String msg = (body is Map ? (body['error'] ?? body['message'] ?? 'Server error') : 'Server error').toString();
+      throw StateError(msg);
     } on DioException catch (e) {
       throw _handleDio(e);
     } on StateError catch (e) {
@@ -496,19 +702,52 @@ class SeekerApi {
     }
   }
 
-  /// Sends a message to [receiverId] (a provider's user ID).
+  /// Polls for messages newer than [sinceId] on [bookingId], plus the
+  /// booking's current status/chat_open — cheap enough to call every few
+  /// seconds without re-sending the whole history each time.
+  Future<Map<String, dynamic>> pollBookingMessages({
+    required int bookingId,
+    required int sinceId,
+  }) async {
+    try {
+      final Response<dynamic> res = await _dio.get(
+        ApiEndpoints.pollBookingMessages,
+        queryParameters: <String, dynamic>{
+          'booking': bookingId,
+          'since': sinceId,
+        },
+      );
+      final dynamic body = res.data;
+      if (body is Map<String, dynamic> && body['ok'] == true) {
+        return <String, dynamic>{
+          'messages': body['data'] ?? <dynamic>[],
+          'status': body['status'],
+          'chat_open': body['chat_open'] == true,
+        };
+      }
+      final String msg = (body is Map ? (body['error'] ?? body['message'] ?? 'Server error') : 'Server error').toString();
+      throw StateError(msg);
+    } on DioException catch (e) {
+      throw _handleDio(e);
+    } on StateError catch (e) {
+      throw _handleStateError(e);
+    }
+  }
+
+  /// Sends a message on [bookingId]'s thread. Rejected server-side if that
+  /// booking's transaction is already closed (completed/cancelled).
   ///
   /// Returns void on success — callers should reload the thread after this
   /// resolves to reflect the newly sent message.
-  Future<void> sendMessage({
-    required int receiverId,
+  Future<void> sendBookingMessage({
+    required int bookingId,
     required String message,
   }) async {
     try {
       final Response<dynamic> res = await _dio.post(
-        ApiEndpoints.sendMessage,
+        ApiEndpoints.sendBookingMessage,
         data: <String, dynamic>{
-          'to': receiverId,
+          'booking_id': bookingId,
           'message': message,
         },
       );
@@ -555,18 +794,35 @@ class SeekerApi {
     String? firstName,
     String? lastName,
     String? phone,
+    String? address,
+    String? city,
+    String? state,
+    String? zipCode,
     File? avatar,
   }) async {
     try {
       final bool hasFile = avatar != null;
 
+      // api/v1/user/profile.php already fully supports address/city/state/
+      // zip_code on both GET and POST (and the provider side of this same
+      // screen already sends address/city) — this method just never sent
+      // them for seekers. Same "backend ready, client never wired up" gap
+      // as several other bugs this session has found and fixed.
+      final Map<String, dynamic> baseFields = <String, dynamic>{
+        if (firstName != null) 'first_name': firstName,
+        if (lastName != null) 'last_name': lastName,
+        if (phone != null) 'phone': phone,
+        if (address != null) 'address': address,
+        if (city != null) 'city': city,
+        if (state != null) 'state': state,
+        if (zipCode != null) 'zip_code': zipCode,
+      };
+
       final Response<dynamic> res;
 
       if (hasFile) {
         final Map<String, dynamic> fields = <String, dynamic>{
-          if (firstName != null) 'first_name': firstName,
-          if (lastName != null) 'last_name': lastName,
-          if (phone != null) 'phone': phone,
+          ...baseFields,
           'avatar': await MultipartFile.fromFile(
             avatar.path,
             filename: avatar.path.split(Platform.pathSeparator).last,
@@ -579,11 +835,7 @@ class SeekerApi {
       } else {
         res = await _dio.post(
           ApiEndpoints.profile,
-          data: <String, dynamic>{
-            if (firstName != null) 'first_name': firstName,
-            if (lastName != null) 'last_name': lastName,
-            if (phone != null) 'phone': phone,
-          },
+          data: baseFields,
         );
       }
 
